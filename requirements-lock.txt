@@ -24,6 +24,6 @@ starlette==1.7.0
 tabulate==0.10.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
-uvicorn==0.53.0
+uvicorn==0.54.0
 yarl==1.25.1
 websockets==17.1
