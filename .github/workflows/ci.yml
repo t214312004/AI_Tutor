@@ -1,0 +1,43 @@
+name: Windows checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      TUTOR_TEST_NO_SANDBOX: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install from lockfiles
+        run: ./scripts/setup.ps1 -PythonExecutable (Get-Command python).Source
+      - name: Audit public files and Git history
+        run: ./.venv/Scripts/python.exe scripts/audit_public.py --staged --history
+      - name: Unit tests
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./.venv/Scripts/python.exe -m unittest discover -s server -t .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:storage
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: First-run and synthetic UI
+        run: |
+          npm run test:first-run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run test:ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

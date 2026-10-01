@@ -1,0 +1,7 @@
+#!/bin/sh
+# Only audited public files may enter a commit, even in a mixed local workspace.
+if [ ! -f .venv/Scripts/python.exe ]; then
+  echo "Create the Python environment with scripts/setup.ps1 before committing." >&2
+  exit 1
+fi
+exec .venv/Scripts/python.exe scripts/audit_public.py --staged

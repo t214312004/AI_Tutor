@@ -1,0 +1,54 @@
+{
+  "schools": [
+    {
+      "id": "demo-school",
+      "school": "範例國小（虛構）",
+      "year": null,
+      "source": "",
+      "notice": "合成展示資料，非真實學校公告。",
+      "textbooks": {
+        "2": {
+          "數學": "合成練習題"
+        },
+        "4": {
+          "數學": "合成練習題"
+        }
+      },
+      "events": []
+    }
+  ],
+  "students": [
+    {
+      "id": "student-2",
+      "name": "小二同學",
+      "grade": 2,
+      "school_id": "demo-school"
+    },
+    {
+      "id": "student-4",
+      "name": "小四同學",
+      "grade": 4,
+      "school_id": "demo-school"
+    },
+    {
+      "id": "student-test",
+      "name": "測試同學",
+      "grade": 3,
+      "preferences": "合成測試學生，用來驗證引導與白板。"
+    }
+  ],
+  "teacher_profiles": {
+    "student-2": {
+      "teacher_name": "範例老師甲",
+      "edge_voice": "zh-TW-YunJheNeural"
+    },
+    "student-4": {
+      "teacher_name": "伴讀老師",
+      "edge_voice": "zh-TW-HsiaoYuNeural"
+    },
+    "student-test": {
+      "teacher_name": "伴讀老師",
+      "edge_voice": "zh-TW-HsiaoYuNeural"
+    }
+  }
+}

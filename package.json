@@ -1,0 +1,46 @@
+{
+  "name": "ai-tutor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Windows 家庭作業陪讀助手",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "desktop": "electron .",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "test:ui": "node scripts/check-ui.mjs",
+    "test:usability": "node scripts/check-usability.mjs",
+    "test:camera": "node scripts/check-camera-output.mjs",
+    "start": "npm run build && electron .",
+    "test:storage": "node --test scripts/check-storage-paths.cjs scripts/check-native-photo-unit.cjs",
+    "test:first-run": "node scripts/check-first-run.mjs",
+    "check:public": ".venv/Scripts/python.exe scripts/audit_public.py"
+  },
+  "dependencies": {
+    "@openai/codex": "0.159.2",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "electron": "44.4.5",
+    "playwright": "^1.55.0",
+    "prettier": "3.9.9",
+    "typescript": "^5.8.0",
+    "vite": "^6.3.0",
+    "vitest": "5.0.1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t214312004/AI_Tutor.git"
+  },
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

@@ -1,0 +1,11 @@
+node_modules/
+.venv/
+.local/
+dist/
+test-results/
+__pycache__/
+data/curriculum/
+data/curriculum-concepts.sqlite3
+
+app-data/
+.runtime/
