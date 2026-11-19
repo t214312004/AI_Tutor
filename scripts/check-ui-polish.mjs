@@ -64,8 +64,8 @@ try {
   await page.keyboard.press('Enter');
   assert.equal(await page.getByRole('tab', { name: '個人檔案', exact: true }).getAttribute('aria-selected'), 'true');
   await page.keyboard.press('Escape');
-  await page.waitForFunction(() => document.activeElement?.textContent?.includes('家長設定'));
-  assert.equal(await page.getByRole('button', { name: '家長設定', exact: true }).evaluate(el => el === document.activeElement), true);
+  await page.getByRole('dialog', { name: '家長設定', exact: true }).waitFor({ state: 'hidden' });
+  await page.getByRole('button', { name: '家長設定', exact: true }).and(page.locator(':focus')).waitFor();
   checks.push('keyboard tabs, activation, Escape, and focus restoration');
 
   await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
