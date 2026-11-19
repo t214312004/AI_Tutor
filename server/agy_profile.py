@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 
+from .collaboration_cli import safe_path
 from .paths import PROJECT
 from .providers import ProviderError
 
@@ -41,10 +42,10 @@ def agy_setup_root():
 
 
 def agy_onboarding():
-    cache = agy_setup_root() / 'profile' / '.gemini' / 'antigravity-cli' / 'cache'
-    path = cache / 'onboarding.json'
+    root = agy_setup_root()
     try:
-        if path.resolve() != path or path.stat().st_size > 2048:
+        path = safe_path(root, 'profile/.gemini/antigravity-cli/cache/onboarding.json')
+        if not path.is_file() or path.stat().st_size > 2048:
             raise ValueError('Unexpected onboarding file')
         value = json.loads(path.read_text(encoding='utf-8'))
         flags = {key: value[key] for key in (

@@ -15,6 +15,7 @@ class TestAgyRuntime(unittest.IsolatedAsyncioTestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         root = Path(folder.name)
+        root = root / '..' / root.name
         self.events, self.records, self.peers = [], [], []
         self.observer = type('Observer', (), {'workspace': root, 'vision_only': True,
             'turn': AsyncMock(return_value='相片上的唯一代號 A19'), 'close': AsyncMock()})()

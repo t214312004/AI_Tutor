@@ -41,7 +41,9 @@ class AgyProfileTests(unittest.TestCase):
             root = Path(directory)
             state = root / 'profile' / '.gemini' / 'antigravity-cli' / 'cache' / 'onboarding.json'
             state.parent.mkdir(parents=True)
-            with patch('server.agy_profile.agy_setup_root', return_value=root):
+            # Path.resolve() may also expand a Windows short name without following a link.
+            alias = root / '..' / root.name
+            with patch('server.agy_profile.agy_setup_root', return_value=alias):
                 with self.assertRaises(ProviderError):
                     agy_onboarding()
                 state.write_text(json.dumps({'consumerOnboardingComplete': True, 'other': 'synthetic'}))

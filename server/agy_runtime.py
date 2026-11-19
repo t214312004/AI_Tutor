@@ -9,6 +9,7 @@ from uuid import uuid4
 from .agy_live import AgyLiveConnection
 from .agy_profile import agy_executable, agy_onboarding
 from .agy_voice import MIC_FRAME_BYTES, SPEAKER_RATE
+from .collaboration_cli import safe_path
 from .diagnostics import report_failure
 from .lesson import empty_lesson, validate_lesson
 from .live_classroom import LiveClassroomRuntime
@@ -217,8 +218,9 @@ class AgyLiveRuntime(LiveClassroomRuntime):
 
     @staticmethod
     def _read_proposal_file(path):
+        path = safe_path(path.parent, path.name)
         stat = path.stat()
-        if path.resolve() != path or stat.st_size > 4096:
+        if not path.is_file() or stat.st_size > 4096:
             return None, None
         raw = path.read_text(encoding='utf-8')
         return (stat.st_mtime_ns, stat.st_size, raw), raw
@@ -240,7 +242,7 @@ class AgyLiveRuntime(LiveClassroomRuntime):
                 try:
                     sig, _ = await asyncio.to_thread(self._read_proposal_file, connection.proposal)
                     self.proposal_signature = sig
-                except OSError:
+                except (OSError, ValueError):
                     self.proposal_signature = None
             if self.session.interaction_mode != 'normal':
                 return text + '\n學生要求先聽完。請不要回答或執行操作。'
