@@ -11,8 +11,15 @@ if ($PythonExecutable) { $pythonCommand = $PythonExecutable }
 elseif ($PythonSource) { $pythonCommand = Join-Path $PythonSource 'python.exe' }
 elseif (Test-Path -LiteralPath $bundledPython) { $pythonCommand = $bundledPython }
 elseif (Get-Command py.exe -ErrorAction SilentlyContinue) {
-    $pythonCommand = 'py.exe'
-    $pythonArgs = @('-3.12')
+    & py.exe -3.12 -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)' 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        $pythonCommand = 'py.exe'
+        $pythonArgs = @('-3.12')
+    } elseif (Get-Command python.exe -ErrorAction SilentlyContinue) {
+        $pythonCommand = 'python.exe'
+    } else {
+        throw '請先安裝 Python 3.12，或以 -PythonExecutable 指定 python.exe。'
+    }
 }
 elseif (Get-Command python.exe -ErrorAction SilentlyContinue) { $pythonCommand = 'python.exe' }
 else { throw '請先安裝 Python 3.12，或以 -PythonExecutable 指定 python.exe。' }
@@ -23,6 +30,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $venv 'Scripts/python.exe'))) {
     & $pythonCommand @pythonArgs -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw '建立 Python 虛擬環境失敗' }
 }
+& ./.venv/Scripts/python.exe -c 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) else 1)'
+if ($LASTEXITCODE -ne 0) { throw '現有 .venv 不是 Python 3.12，請刪除 .venv 後重新執行 setup.ps1。' }
 & ./.venv/Scripts/python.exe -m pip install --cache-dir .local/pip-cache -r requirements-lock.txt
 if ($LASTEXITCODE -ne 0) { throw 'Python 套件安裝失敗' }
 npm.cmd ci
@@ -39,7 +48,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'node_modules/electron/
 }
 npm.cmd run build
 if ($LASTEXITCODE -ne 0) { throw '介面編譯失敗' }
-if (Test-Path -LiteralPath (Join-Path $projectRoot '.git')) {
+if ((Test-Path -LiteralPath (Join-Path $projectRoot '.git')) -and (Get-Command git -ErrorAction SilentlyContinue)) {
     git config --local core.hooksPath .githooks
     if ($LASTEXITCODE -ne 0) { throw '設定公開檔案檢查 hook 失敗' }
 }

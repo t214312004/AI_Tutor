@@ -66,54 +66,60 @@ def prepare_student_workspace(student_root):
 
 
 class BasicWorkspace:
-    def __init__(self,root,teacher_name=''):
+    def __init__(self,root,teacher_name='',write_guide=True):
         self.root=Path(root).resolve()
         self.internal=self.root/'internal'
         self.internal.mkdir(parents=True,exist_ok=True)
         self.photos=self.internal/'photos'
         self.photos.mkdir(parents=True,exist_ok=True)
-        guide=self.root/'AGENTS.md'
-        current_guide=agent_guide(teacher_name) if teacher_name else AGENT_GUIDE
-        if not guide.exists():
-            guide.write_text(current_guide,encoding='utf-8')
-        elif guide.read_text(encoding='utf-8')!=current_guide:
-            guides=self.internal/'guides'
-            guides.mkdir(exist_ok=True)
-            shutil.copy2(guide,guides/f'{uuid4().hex}.md')
-            guide.write_text(current_guide,encoding='utf-8')
-        self.photo=self.internal/'latest-photo.jpg'
+        if write_guide:
+            guide=self.root/'AGENTS.md'
+            current_guide=agent_guide(teacher_name) if teacher_name else AGENT_GUIDE
+            if not guide.exists():
+                guide.write_text(current_guide,encoding='utf-8')
+            elif guide.read_text(encoding='utf-8')!=current_guide:
+                guides=self.internal/'guides'
+                guides.mkdir(exist_ok=True)
+                shutil.copy2(guide,guides/f'{uuid4().hex}.md')
+                guide.write_text(current_guide,encoding='utf-8')
         self.metadata=self.internal/'latest-photo.json'
-        try:self.version=max(0,int(json.loads(self.metadata.read_text(encoding='utf-8'))['version']))
+        self.photo=self.internal/'latest-photo.jpg'
+        try:
+            saved_meta = json.loads(self.metadata.read_text(encoding='utf-8'))
+            self.version=max(0,int(saved_meta['version']))
+            if isinstance(saved_meta.get('path'), str) and saved_meta['path'].endswith('.png'):
+                self.photo=self.internal/'latest-photo.png'
         except (OSError,ValueError,KeyError,TypeError):self.version=0
         self.lock=asyncio.Lock()
 
-    def continuity(self):
-        return {'workspace':'.','latest_photo_metadata':'internal/latest-photo.json',
-                'photo_archive':'internal/photos/','prior_session_files':'prior-sessions/',
-                'instruction':'可讀取既有筆記與舊照片來接續，但舊照片不是目前鏡頭畫面；以本回合課程狀態及學生說話為準。'}
-
     async def publish(self,image_url,captured_at=None,capture_id=None,camera_epoch=None):
-        if not isinstance(image_url,str) or not image_url.startswith('data:image/jpeg;base64,'):
+        if not isinstance(image_url,str) or not image_url.startswith(('data:image/jpeg;base64,','data:image/png;base64,')):
             raise ValueError('無效照片')
         try:image=base64.b64decode(image_url.split(',',1)[1],validate=True)
         except binascii.Error as error:raise ValueError('照片編碼無效') from error
-        if not image.startswith(b'\xff\xd8\xff') or len(image)>3_000_000:raise ValueError('照片格式或大小無效')
+        png=image_url.startswith('data:image/png;')
+        extension='png' if png else 'jpg'
+        if not image.startswith(b'\x89PNG\r\n\x1a\n' if png else b'\xff\xd8\xff') or len(image)>12_000_000:raise ValueError('照片格式或大小無效')
         async with self.lock:
             version=self.version+1
             token=uuid4().hex
-            archive=self.photos/f'{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{token}.jpg'
+            archive=self.photos/f'{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{token}.{extension}'
+            photo=self.internal/f'latest-photo.{extension}'
+            alternate=self.internal/f'latest-photo.{"jpg" if png else "png"}'
             notice={'version':version,'capture_id':capture_id or token,'camera_epoch':camera_epoch,
                     'captured_at':captured_at or datetime.now(timezone.utc).isoformat(timespec='seconds'),
-                    'path':'internal/latest-photo.jpg','archive_path':f'internal/photos/{archive.name}'}
+                    'path':f'internal/latest-photo.{extension}','archive_path':f'internal/photos/{archive.name}'}
             temp_photo=self.internal/f'.photo-{token}.tmp'
             temp_metadata=self.internal/f'.metadata-{token}.tmp'
             try:
                 await asyncio.to_thread(temp_photo.write_bytes,image)
-                os.replace(temp_photo,archive)
+                await asyncio.to_thread(os.replace,temp_photo,archive)
                 await asyncio.to_thread(shutil.copyfile,archive,temp_photo)
                 await asyncio.to_thread(temp_metadata.write_text,json.dumps(notice,ensure_ascii=False),encoding='utf-8')
-                os.replace(temp_photo,self.photo)
-                os.replace(temp_metadata,self.metadata)
+                await asyncio.to_thread(os.replace,temp_photo,photo)
+                alternate.unlink(missing_ok=True)
+                self.photo=photo
+                await asyncio.to_thread(os.replace,temp_metadata,self.metadata)
                 self.version=version
             finally:
                 temp_photo.unlink(missing_ok=True)

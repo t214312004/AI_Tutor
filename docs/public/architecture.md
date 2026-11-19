@@ -1,13 +1,17 @@
 # 架構與資料邊界
 
-Electron 是桌面與裝置入口，React 負責課前、陪讀、家長設定與學習記憶介面。Electron 啟動 Python FastAPI 核心並透過隨機 bearer token 連接 loopback HTTP／WebSocket；核心管理學生、課堂、影像處理與供應商生命週期。
+Electron 管理桌面、裝置和隔離白板。React 只提供 Codex Live 與 agy Live。Python FastAPI 透過具備課堂識別與隨機授權的本機連線管理學生資料及課堂。
 
-`server/storage.py` 維護學生 registry 及各自的 SQLite 學習資料。`basic_workspace.py`、`live_runtime.py` 與 `post_lesson.py` 管理工作區、即時教學及課後整理。白板由隔離 web contents 顯示，學生資料不應由其他學生的課堂工作區讀取。
+- 共用的 `ClassroomRuntime` 與 `LiveClassroomRuntime` 管理相機、工作版本、照片索引、作業與白板提交。角色接頭不得直接寫入正式課堂狀態。
+- Codex 使用 app-server 管理同一個教學對話，麥克風與播音經 WebRTC。背景索引寫入教學歷史，工具沿用原生教學回合。
+- agy 使用專用 Windows 首次設定及隔離終端啟動原生語音。桌面以本機 PCM 傳輸收音及播音。停止或重連先撤銷舊媒體，再回收程序。白板提案由介面確認後才走共用提交。
+- 兩種模式各有一個由程式呼叫的獨立看圖角色。只有它取得原圖，每張照片使用獨立辨識脈絡。先保存結果，再發布時間及短引用。agy 在既有交接回合帶入索引，照片完成本身不觸發語音。
+- 課後整理根據已保存事件及作業狀態在本機執行。歷史記錄仍可讀取。中斷接續使用課堂檢查點重新建立原生對話，重新取得目前相片。
+- `teaching_policy.py` 與 `teaching_context.py` 為兩種原生語音提供共用教學原則、跨堂及家長背景。課綱候選帶來源與擷取品質；`teaching_cards.py` 的原創草稿須由家長核對後才提供給老師。
+- `learning_practice.py` 將練習作答與作業完成、概念掌握分開保存。模型只提交有本次原文依據的待核對紀錄；家長複核後才作後續教學背景。agy 僅能提議有短引用的學生文字紀錄，另需畫面確認；沒有語音逐字稿時由家長補記。
 
-`server/providers.py` 實作 Codex／agy adapter；`server/live.py` 接即時音訊；`openai_vision.py` 接圖片辨識。供應商可用性、登入、模型及 effort 依實際設定檢查；功能接線不代表每個模型或教學情境均已驗收。
+`storage.py` 管理 SQLite 和歷史資料。`work_lifecycle.py` 核對課堂版本、操作來源及有效期。`transcript_projection.py` 整理可用的逐字稿。逐字稿及服務通知不能證明學生已聽到播放。學習證據使用已核對的原話、概念及說話者。
 
-`electron/storage-paths.cjs` 與 `server/paths.py` 解析資料位置。桌面端先解析並把 TUTOR_HOME、TUTOR_DATA_DIR、TUTOR_CURRICULUM_DIR 傳給核心，避免兩邊使用不同資料根。資料庫新增、schema 升級及課程中斷恢復由 Store 管理。
+資料位置由 `electron/storage-paths.cjs` 與 `server/paths.py` 解析。預設新安裝不自動新增學生，合成展示資料需由使用者明確載入。課綱匯入保留來源、頁碼與解析狀態，模型找到的候選不等於人工核對。
 
-公開新安裝不自動產生學生或學校；家長新增學生後開始使用。合成 demo 只可明確載入空資料庫。`examples/demo.json` 與 `server/test_support.py` 僅含虛構資料；自動測試明確指定獨立資料根，不讀作者的家庭設定或課綱資料庫。
-
-課綱匯入保留來源 URL、hash、頁碼及解析狀態；候選條目自動擷取不等於人工核對或教學品質驗證。課綱 cache 缺少時 UI 顯示尚未匯入，不要求使用者取得作者本機資料。
+[資料與隱私](privacy.md)

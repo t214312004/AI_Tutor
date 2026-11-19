@@ -30,9 +30,11 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
     [searched, setSearched] = useState(false);
   const searchVersion = useRef(0);
   useEffect(() => {
+    let active = true;
     void request('/curriculum/coverage')
-      .then(setCoverage)
-      .catch((e) => setError(e.message));
+      .then((value) => { if (active) setCoverage(value); })
+      .catch((e) => { if (active) setError(e instanceof Error ? e.message : String(e)); });
+    return () => { active = false; };
   }, []);
   useEffect(() => {
     searchVersion.current++;
@@ -42,6 +44,7 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
     setBusy(false);
   }, [grade, subject, query]);
   async function search() {
+    const trimmed = query.trim();
     const version = ++searchVersion.current;
     setBusy(true);
     setError('');
@@ -49,7 +52,7 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
       const [original, mapped] = await Promise.all([
         request(
           '/curriculum/search?q=' +
-            encodeURIComponent(query) +
+            encodeURIComponent(trimmed) +
             '&subject=' +
             encodeURIComponent(subject),
         ),
@@ -60,7 +63,7 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
                 '&subject=' +
                 encodeURIComponent(subject) +
                 '&q=' +
-                encodeURIComponent(query),
+                encodeURIComponent(trimmed),
             )
           : Promise.resolve({ results: [] }),
       ]);
@@ -122,9 +125,10 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
         想找的學習內容
         <input
           value={query}
+          maxLength={80}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && query.trim().length >= 2) void search();
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing && !busy && query.trim().length >= 2) void search();
           }}
           placeholder="例如：乘法、分數、閱讀理解"
         />
@@ -139,7 +143,7 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
         </p>
       )}
       {searched && hits.length === 0 && concepts.length === 0 && (
-        <p className="muted-copy">沒有找到符合的原文。請換個詞或擴大科目範圍。</p>
+        <p className="muted-copy empty-state" role="status">沒有找到符合的原文。請換個詞或擴大科目範圍。</p>
       )}
       {searched && concepts.length > 0 && (
         <div className="curriculum-hits">
@@ -156,16 +160,20 @@ export default function CurriculumPanel({ grade }: { grade: number }) {
           ))}
         </div>
       )}
-      {searched && hits.length > 0 && <h4>官方原文搜尋</h4>}
-      <div className="curriculum-hits">
-        {hits.map((h) => (
-          <article key={h.sha256 + ':' + h.page}>
-            <h4>{h.title}</h4>
-            <span>來源 PDF 第 {h.page} 頁</span>
-            <p>{h.excerpt}</p>
-          </article>
-        ))}
-      </div>
+      {searched && hits.length > 0 && (
+        <>
+          <h4>官方原文搜尋</h4>
+          <div className="curriculum-hits">
+            {hits.map((h) => (
+              <article key={h.sha256 + ':' + h.page}>
+                <h4>{h.title}</h4>
+                <span>來源 PDF 第 {h.page} 頁</span>
+                <p>{h.excerpt}</p>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

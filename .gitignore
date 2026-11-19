@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .local/
 test-results/
+/tmp/
 .env*
 !.env.example
 data/curriculum/*.pdf

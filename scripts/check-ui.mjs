@@ -1,6 +1,5 @@
 import { _electron as electron } from 'playwright';
 import fs from 'node:fs/promises';
-import path from 'node:path';
 import assert from 'node:assert/strict';
 import { electronTestFlags } from './electron-test-flags.mjs';
 await fs.mkdir('test-results', { recursive: true });
@@ -19,7 +18,7 @@ try {
   const page = await app.firstWindow();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   await page.getByRole('button', { name: '關閉鏡頭' }).waitFor();
   await page.waitForFunction(() => document.querySelector('video')?.videoWidth > 0);
   await page.getByLabel('旋轉角度').selectOption('90');
@@ -57,28 +56,8 @@ try {
   assert.ok(Object.values(stored).some((s) => s.corners[0][0] > 0.05 && s.corners[0][1] > 0.05));
   await page.getByRole('button', { name: '還原完整畫面' }).click();
   await page.locator('.preflight-optional > summary').click();
-  await page.getByLabel('說話聲音').selectOption('zh-TW-HsiaoChenNeural');
-  let requestedVoice = '';
-  await page.route('**/diagnostics/tts', async (route) => {
-    requestedVoice = route.request().postDataJSON().voice;
-    await route.fulfill({ json: { audio: 'AA==', boundaries: [] } });
-  });
-  await page.evaluate(() => {
-    window.__originalAudio = window.Audio;
-    window.Audio = class extends window.Audio {
-      play() {
-        return Promise.resolve();
-      }
-    };
-  });
-  await page.getByRole('button', { name: '試聽老師聲音' }).click();
-  await page.getByRole('button', { name: '停止試聽' }).waitFor();
-  assert.equal(requestedVoice, 'zh-TW-HsiaoChenNeural');
-  await page.getByRole('button', { name: '停止試聽' }).click();
-  await page.evaluate(() => {
-    window.Audio = window.__originalAudio;
-  });
-  await page.unroute('**/diagnostics/tts');
+  assert.equal(await page.getByRole('button', { name: '試聽老師聲音' }).count(), 0);
+  assert.equal(await page.getByText('老師試聽', { exact: false }).count(), 0);
   await page.evaluate(() => {
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     navigator.mediaDevices.getUserMedia = async (constraints) => {
@@ -104,6 +83,8 @@ try {
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.screenshot({ path: 'test-results/home.png' });
   await page.getByRole('button', { name: '家長設定' }).click();
+  assert.deepEqual(await page.getByRole('tablist', { name: '家長設定頁面' }).getByRole('tab').allTextContents(),
+    ['個人檔案', '學習紀錄', '學校與課綱']);
   await page.getByRole('tab', { name: '學校與課綱', exact: true }).click();
   await page.getByRole('heading', { name: '範例國小（虛構）' }).waitFor();
   await page.locator('.profile-selector').getByRole('button', { name: '測試同學' }).click();
@@ -124,15 +105,15 @@ try {
     'live',
   );
   await page.locator('.students').getByRole('button', { name: /測試同學/ }).click();
-  await page.getByLabel('說話聲音').selectOption('zh-TW-HsiaoChenNeural');
+  await page.getByLabel('Codex 老師聲線').selectOption('arbor');
   let sessionVoice = '';
   page.on('request', (request) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname === '/sessions')
-      sessionVoice = request.postDataJSON().edge_voice;
+      sessionVoice = request.postDataJSON().codex_voice;
   });
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await page.getByRole('button', { name: '關鏡頭', exact: true }).waitFor();
-  assert.equal(sessionVoice, 'zh-TW-HsiaoChenNeural');
+  assert.equal(sessionVoice, 'arbor');
   assert.equal(
     await page.evaluate(() => window.__cameraCallsAfterPreview),
     0,
@@ -192,7 +173,7 @@ try {
     () => document.querySelector('video').srcObject.getVideoTracks()[0].id,
   );
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   await page.getByRole('button', { name: '關閉鏡頭' }).waitFor();
   assert.notEqual(
     await page.evaluate(() => document.querySelector('video').srcObject.getVideoTracks()[0].id),
@@ -201,7 +182,7 @@ try {
   await page.locator('.preflight-frame canvas:not(.hidden)').waitFor();
   await page.getByRole('button', { name: '家長設定' }).click();
   await page.getByRole('tab', { name: '學習紀錄', exact: true }).click();
-  await page.locator('.history-row').first().waitFor();
+  await page.locator('.history-row').first().getByText(/^Codex Live · 已結束/).waitFor();
   await page.getByRole('button', { name: '關閉設定' }).click();
   for (const [width, height] of [
     [1366, 768],
@@ -252,7 +233,7 @@ try {
     'all-display fullscreen entry/ESC exit',
     'fake camera single owner',
     'preflight perspective calibration',
-    'selected teacher voice preview',
+      'selected Codex voice is sent with the session',
     'preflight microphone check releases its track',
     'separate-process isolated JS board',
     'camera release',

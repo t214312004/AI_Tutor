@@ -1,10 +1,8 @@
 import asyncio
-import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 from .basic import BasicRuntime
 from .lesson import apply_lesson,empty_lesson,lesson_state
 from .test_support import SeededStore as Store
@@ -71,6 +69,15 @@ class LessonTests(unittest.TestCase):
             self.assertEqual(store.learning_context('student-test')[0]['student_questions'],['錯誤轉錄'])
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_completion_does_not_transfer_to_reused_task_id(self):
+        runtime=self.make();runtime.session.tasks=proposal()['tasks']
+        await runtime.update_lesson('done','math')
+        changed=proposal();changed['tasks'][0]['title']='數學習作第13頁'
+        apply_lesson(runtime.session,changed,'下一頁')
+        self.assertEqual(runtime.session.tasks[0]['status'],'todo')
+        self.assertNotIn('math',runtime.session.manual_task_status)
+        await runtime.close()
+
     def make(self):
         self.events=[];self.saved=[]
         async def emit(event):self.events.append(event)

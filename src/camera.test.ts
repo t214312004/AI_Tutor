@@ -39,6 +39,24 @@ describe('camera geometry', () => {
       ]),
     ).toThrow();
   });
+  it('maps a trapezoid accurately via homography', () => {
+    const trapezoid: [number, number][] = [
+      [0.1, 0.1],
+      [0.9, 0.1],
+      [0.8, 0.9],
+      [0.2, 0.9],
+    ];
+    const h = homography(trapezoid);
+    for (let i = 0; i < 4; i++) {
+      const [u, v] = defaultCorners[i];
+      const w = h[6] * u + h[7] * v + 1;
+      const sx = (h[0] * u + h[1] * v + h[2]) / w;
+      const sy = (h[3] * u + h[4] * v + h[5]) / w;
+      expect(sx).toBeCloseTo(trapezoid[i][0], 6);
+      expect(sy).toBeCloseTo(trapezoid[i][1], 6);
+    }
+  });
+
   it('maps a selected question to source corners without resetting the page calibration', () => {
     const page={...defaultCameraSettings,corners:[[0.1,0.1],[0.9,0.1],[0.9,0.9],[0.1,0.9]] as [number,number][]};
     const focused=focusCameraSettings(page,[0.25,0.25,0.75,0.75]);

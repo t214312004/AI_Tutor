@@ -13,10 +13,19 @@ LESSON_SCHEMA={'type':'object','additionalProperties':False,'properties':{
     'focus':{'type':'string'},'confidence':{'type':'string','enum':['low','high']}},
     'required':['tasks','confirmation_quote','signal','focus','confidence']}
 
+TASK_ID_RE = re.compile(r'[a-zA-Z0-9_-]{1,40}')
+PAGE_NUM_RE = re.compile(r'(?<!\d)(\d+)\s*頁')
+COMPLETION_NEGATED_RE = re.compile('還沒|尚未|沒有|沒寫|沒做|沒完|未完成|未寫完|未做完|不是|不對|不要|嗎|呢|[?？]')
+COMPLETION_DONE_RE = re.compile('完成|做完|寫完|好了')
+CONFIRMATION_NEGATED_RE = re.compile('不是|不對|不要|不好|不行|不可以|錯了|嗎|呢|[?？]')
+CONFIRMATION_OK_RE = re.compile('對|沒錯|好|是|確認|就這些|今天|要寫')
+
+
 def empty_lesson():
     return {'tasks':[],'confirmation_quote':'','signal':'none','focus':'','confidence':'low'}
 
 def validate_lesson(value):
+    from .tutor import validate_visible_text
     if not isinstance(value,dict) or set(value)!=set(LESSON_SCHEMA['required']):raise ValueError('無效課程狀態')
     if value['signal'] not in ('none','completed_step','repeated_correction') or value['confidence'] not in ('low','high'):raise ValueError('無效觀察訊號')
     if any(not isinstance(value[k],str) or len(value[k])>200 for k in ('confirmation_quote','focus')):raise ValueError('課程文字過長')
@@ -25,8 +34,9 @@ def validate_lesson(value):
     for task in value['tasks']:
         if not isinstance(task,dict) or set(task)!=set(TASK_SCHEMA['required']):raise ValueError('無效作業項目')
         if any(not isinstance(v,str) for v in task.values()):raise ValueError('無效作業文字')
-        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,40}',task['id']) or task['id'] in ids:raise ValueError('重複作業識別')
+        if not TASK_ID_RE.fullmatch(task['id']) or task['id'] in ids:raise ValueError('重複作業識別')
         if not 1<=len(task['title'].strip())<=160 or len(task['evidence_quote'])>300 or task['status'] not in ('todo','done'):raise ValueError('無效作業狀態')
+        validate_visible_text(task['title'])
         ids.add(task['id'])
     return value
 
@@ -35,8 +45,8 @@ def identifies_task(quote,task,tasks):
     subjects=('數學','國語','英文','英語','自然','社會')
     named=[subject for subject in subjects if subject in quote and subject in task['title']]
     if any(sum(subject in candidate['title'] for candidate in tasks)==1 for subject in named):return True
-    pages=set(re.findall(r'\d+\s*頁',quote)) & set(re.findall(r'\d+\s*頁',task['title']))
-    return any(sum(page in candidate['title'] for candidate in tasks)==1 for page in pages)
+    pages=set(PAGE_NUM_RE.findall(quote)) & set(PAGE_NUM_RE.findall(task['title']))
+    return any(sum(page in PAGE_NUM_RE.findall(candidate['title']) for candidate in tasks)==1 for page in pages)
 
 def apply_lesson(session,proposal,utterance):
     """Only a fresh spoken quote or explicit UI action may confirm completion."""
@@ -44,27 +54,30 @@ def apply_lesson(session,proposal,utterance):
     next_tasks=[]
     # Check the whole utterance. A provider may quote only "寫完了" from
     # "我還沒寫完了", which must not become proof of completion.
-    completion_negated=bool(re.search('還沒|尚未|沒有|沒寫|沒做|沒完|未完成|未寫完|未做完|不是|不對|不要|嗎|呢|[?？]',utterance))
+    completion_negated=bool(COMPLETION_NEGATED_RE.search(utterance))
     for proposed in proposal['tasks']:
         task=copy.deepcopy(proposed);old=previous.get(task['id'])
         quote=task['evidence_quote'].strip()
         # Pictures alone must not silently mark the entire homework complete.
         supported=bool(quote and quote in utterance and not completion_negated
                        and identifies_task(quote,task,proposal['tasks'])
-                       and re.search('完成|做完|寫完|好了',quote)
-                       and not re.search('嗎',quote))
+                       and COMPLETION_DONE_RE.search(quote))
         task['status']='done' if task['status']=='done' and (supported or (old and old['title']==task['title'] and old['status']=='done')) else 'todo'
+        if task['id'] in session.manual_task_status and (not old or old['title']!=task['title']):
+            session.manual_task_status.pop(task['id'])
         if task['id'] in session.manual_task_status:
             task['status']=session.manual_task_status[task['id']]
             task['evidence_quote']='學生在畫面上勾選' if task['status']=='done' else ''
         next_tasks.append(task)
     if not next_tasks:return False
+    session.manual_task_status={key:value for key,value in session.manual_task_status.items()
+                                if key in {task['id'] for task in next_tasks}}
     changed=[(t['id'],t['title']) for t in next_tasks]!=[(t['id'],t['title']) for t in session.tasks]
     session.tasks=next_tasks
     if changed:session.plan_confirmed=False
     quote=proposal['confirmation_quote'].strip()
-    confirmation_negated=bool(re.search('不是|不對|不要|不好|不行|不可以|錯了|嗎|呢|[?？]',utterance))
-    if quote and quote in utterance and not confirmation_negated and re.search('對|沒錯|好|是|確認|就這些|今天|要寫',quote):session.plan_confirmed=True
+    confirmation_negated=bool(CONFIRMATION_NEGATED_RE.search(utterance))
+    if quote and quote in utterance and not confirmation_negated and CONFIRMATION_OK_RE.search(quote):session.plan_confirmed=True
     return True
 
 def lesson_state(session):

@@ -154,12 +154,12 @@ class SessionAudit:
         with events.open(encoding='utf-8', errors='replace') as stream:
             for line in stream:
                 try:item = json.loads(line)
-                except (json.JSONDecodeError, UnicodeDecodeError):continue  # A process can stop during a write.
+                except json.JSONDecodeError:continue  # A process can stop during a write.
                 if not isinstance(item, dict):continue
                 if first is None and item.get('kind') == 'session_started':first = item
                 number = item.get('sequence')
                 if isinstance(number, int):sequence = max(sequence, number)
-        if not first or first.get('kind') != 'session_started' or not first.get('workspace'):
+        if not first or not first.get('workspace'):
             return None
         audit = cls.__new__(cls)
         audit.root = folder
@@ -176,6 +176,13 @@ class SessionAudit:
         guide = self.workspace / 'AGENTS.md'
         if guide.is_file():
             (self.root / 'AGENTS.md').write_bytes(guide.read_bytes())
+        else:
+            for role in ('teacher','vision'):
+                guide=self.workspace/role/'AGENTS.md'
+                if guide.is_file():
+                    destination=self.root/role/'AGENTS.md'
+                    destination.parent.mkdir(exist_ok=True)
+                    destination.write_bytes(guide.read_bytes())
 
     def attach_diagnostics(self):
         if self.diagnostic_handler is None:
@@ -183,50 +190,61 @@ class SessionAudit:
             logging.getLogger('tutor.transport').addHandler(self.diagnostic_handler)
 
     def finish(self):
-        if self.finished:
-            return
-        try:self.record('session_closed')
-        finally:
-            self.finished = True
-            if self.diagnostic_handler is not None:
-                logging.getLogger('tutor.transport').removeHandler(self.diagnostic_handler)
-                self.diagnostic_handler.close()
+        with self.lock:
+            if self.finished:
+                return
+            try:
+                self._record_locked('session_closed')
+            finally:
+                self.finished = True
+                handler = self.diagnostic_handler
                 self.diagnostic_handler = None
+        if handler is not None:
+            logging.getLogger('tutor.transport').removeHandler(handler)
+            handler.close()
+
+    def _record_locked(self, kind: str, **details):
+        sequence = self.sequence + 1
+        item = {'sequence': sequence, 'at': datetime.now(timezone.utc).isoformat(),
+                'kind': kind, **details}
+        encoded = json.dumps(item, ensure_ascii=False) + '\n'
+        try:
+            with self.events.open('a', encoding='utf-8') as stream:
+                stream.write(encoded)
+        except OSError as error:
+            logging.getLogger('tutor.audit').warning('audit_write_failed session=%s type=%s',
+                                                     self.root.name, type(error).__name__)
+            return None
+        self.sequence = sequence
+        return sequence
 
     def record(self, kind: str, **details):
         with self.lock:
-            sequence = self.sequence + 1
-            item = {'sequence': sequence, 'at': datetime.now(timezone.utc).isoformat(),
-                    'kind': kind, **details}
-            encoded = json.dumps(item, ensure_ascii=False) + '\n'
-            try:
-                with self.events.open('a', encoding='utf-8') as stream:
-                    stream.write(encoded)
-            except OSError as error:
-                logging.getLogger('tutor.audit').warning('audit_write_failed session=%s type=%s',
-                                                         self.root.name, type(error).__name__)
+            if self.finished:
                 return None
-            self.sequence = sequence
-            return sequence
+            return self._record_locked(kind, **details)
 
     def save_live_photo(self, capture_id: str, image_url: str, captured_at: str):
         try:
+            safe_id = ''.join(ch for ch in str(capture_id) if ch.isalnum() or ch in ('-', '_'))[:64]
+            if not safe_id or ',' not in str(image_url):
+                raise ValueError('Invalid live photo metadata')
             image = base64.b64decode(image_url.split(',', 1)[1], validate=True)
             photos = self.root / 'photos'
             photos.mkdir(exist_ok=True)
             suffix = 'png' if image_url.startswith('data:image/png;base64,') else 'jpg'
-            path = photos / f'{capture_id}.{suffix}'
+            path = photos / f'{safe_id}.{suffix}'
             path.write_bytes(image)
-            self.record('photo_saved', capture_id=capture_id, captured_at=captured_at,
+            self.record('photo_saved', capture_id=safe_id, captured_at=captured_at,
                         path=f'photos/{path.name}', sha256=hashlib.sha256(image).hexdigest())
-        except OSError as error:
+        except (OSError, ValueError, IndexError) as error:
             logging.getLogger('tutor.audit').warning('photo_archive_failed session=%s type=%s',
                                                      self.root.name, type(error).__name__)
 
     def snapshot_workspace(self, source=None, folder='workspace-after'):
         """Keep the end-of-lesson notes even when the shared workspace changes later."""
         try:
-            workspace = Path(source) if source else self.workspace
+            workspace = (Path(source) if source else self.workspace).absolute()
             destination = self.root / folder
             if any(_is_link(part) for part in (workspace, *workspace.parents)) or _is_link(destination):
                 raise OSError('Workspace snapshot path contains a link')
@@ -261,6 +279,8 @@ class AuditedProvider:
 
     def _attach(self, provider):
         provider.audit = self.audit
+        if hasattr(provider, 'collaboration'):
+            self._attach(provider.provider)
         if hasattr(provider, 'client'):
             provider.client.audit = self.audit
         for backend in getattr(provider, 'backends', {}).values():

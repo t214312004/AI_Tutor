@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { request } from './api';
 
 type Concept = {
@@ -27,6 +27,10 @@ function ConceptCard({ item, studentId, refresh, report }: {
   const [status, setStatus] = useState(item.parent_status);
   const [note, setNote] = useState(item.parent_note);
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setStatus(item.parent_status);
+    setNote(item.parent_note);
+  }, [item.parent_status, item.parent_note]);
   async function save() {
     setSaving(true);
     try {
@@ -59,6 +63,9 @@ function EvidenceRow({ item, studentId, refresh, report }: {
 }) {
   const [quote, setQuote] = useState(item.quote);
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setQuote(item.quote);
+  }, [item.quote]);
   async function change(exclude: boolean) {
     if (exclude && !confirm('排除這筆證據？之後教學將不再使用它。')) return;
     setSaving(true);

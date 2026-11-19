@@ -20,7 +20,7 @@ contextBridge.exposeInMainWorld('desktop', {
     ipcRenderer.sendSync('finalization:guard-sync', !!value);
     return Promise.resolve();
   },
-  saveKeys: (keys) => ipcRenderer.invoke('keys:save', keys),
+  setupAgy: () => ipcRenderer.invoke('agy:setup'),
   board: (html, bounds) => ipcRenderer.invoke('board:show', html, bounds),
   closeBoard: () => ipcRenderer.invoke('board:close'),
   resizeBoard: (bounds) => ipcRenderer.invoke('board:bounds', bounds),

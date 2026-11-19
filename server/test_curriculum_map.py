@@ -1,4 +1,3 @@
-import asyncio
 import json
 import sqlite3
 import tempfile
@@ -42,6 +41,22 @@ class CurriculumMapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(curriculum_map.concepts(2,'自然科學','植物'),[])
         performance=curriculum_map.concepts(2,'數學','加法')
         self.assertTrue(any(r['code']=='n-I-2' and r['kind']=='學習表現' for r in performance))
+    def test_read_only_catalogs_handle_uri_characters_in_storage_path(self):
+        from . import curriculum
+        special=Path(self.folder.name)/'課綱 #100%'
+        special.mkdir()
+        source=special/'curriculum.sqlite3';source.write_bytes(self.source.read_bytes())
+        catalog=special/'concepts.sqlite3';catalog.write_bytes(self.catalog.read_bytes())
+        with patch.object(curriculum,'DATA',special):
+            self.assertTrue(curriculum.search('加減'))
+        self.assertTrue(curriculum_map.concepts(2,'數學','加法',catalog=catalog))
+    def test_failed_rebuild_preserves_last_complete_catalog(self):
+        incomplete=Path(self.folder.name)/'incomplete.sqlite3'
+        sqlite3.connect(incomplete).close()
+        with self.assertRaises(sqlite3.OperationalError):
+            curriculum_map.build(incomplete,self.catalog)
+        self.assertTrue(curriculum_map.concepts(2,'數學','加法'))
+        with self.assertRaises(ValueError):curriculum_map.build(self.source,self.source)
     def test_small_addition_uses_explicit_prerequisite(self):
         refs=curriculum_map.teaching_references(2,'七加五怎麼算？','今天做數學')
         self.assertEqual(refs[0]['code'],'N-1-3')

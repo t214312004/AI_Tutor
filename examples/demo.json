@@ -39,16 +39,13 @@
   ],
   "teacher_profiles": {
     "student-2": {
-      "teacher_name": "範例老師甲",
-      "edge_voice": "zh-TW-YunJheNeural"
+      "teacher_name": "範例老師甲"
     },
     "student-4": {
-      "teacher_name": "伴讀老師",
-      "edge_voice": "zh-TW-HsiaoYuNeural"
+      "teacher_name": "伴讀老師"
     },
     "student-test": {
-      "teacher_name": "伴讀老師",
-      "edge_voice": "zh-TW-HsiaoYuNeural"
+      "teacher_name": "伴讀老師"
     }
   }
 }

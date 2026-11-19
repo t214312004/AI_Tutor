@@ -10,7 +10,7 @@ const app = await electron.launch({
 try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await page.getByRole('button', { name: '結束', exact: true }).waitFor();
   let release;
   const held = new Promise((resolve) => { release = resolve; });
@@ -25,7 +25,7 @@ try {
   await page.getByRole('button', { name: '結束', exact: true }).click();
   await requested;
   await page.getByRole('heading', { name: '正在保存本次陪讀紀錄' }).waitFor();
-  assert.equal(await page.getByRole('button', { name: '開始專注工作區' }).count(), 0);
+  assert.equal(await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).count(), 0);
   assert.ok((await page.locator('.finalization-card').innerText()).includes('收音、拍照與播音已停止'));
   await page.clock.fastForward(31000);
   await page.getByText('仍在整理。收音、拍照與播音已停止；正在確認本次紀錄的保存狀態。').waitFor();
@@ -38,7 +38,7 @@ try {
   });
   assert.equal(guarded, true, 'window close should be blocked while finalizing');
   release();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   const status = await page.evaluate(async () => {
     const connection = await window.desktop.connection();
     const response = await fetch(connection.base + '/students/student-2/history', {
@@ -48,10 +48,27 @@ try {
   });
   assert.equal(status.state, 'completed');
   assert.equal(status.summary, null);
+  await page.unroute('**/sessions/*/finalize');
+  await page.clock.resume();
+  let retries = 0;
+  await page.route('**/sessions/*/finalization/retry', async route => {
+    retries++;
+    await route.continue();
+  });
+  await page.route('**/sessions/*/finalize', async route => {
+    await route.fetch(); // The server saved the lesson, but the response was lost.
+    await route.abort('failed');
+  });
+  await page.getByRole('button', {name:'檢查訂閱並開始陪讀'}).click();
+  await page.getByRole('button', {name:'結束',exact:true}).click();
+  await page.getByRole('button', {name:'重試整理',exact:true}).click();
+  await page.getByRole('button', {name:'檢查訂閱並開始陪讀'}).waitFor();
+  assert.equal(retries, 0, 'already saved finalization must be adopted without retrying a completed job');
   console.log(JSON.stringify({ passed: ['visible saving screen before completion',
     'long wait message after 30 seconds',
     'window close is guarded while finalizing',
-    'returns home after durable offline finalization', 'does not claim offline AI analysis'] }));
+    'returns home after durable offline finalization', 'does not claim offline AI analysis',
+    'recovers a lost finalization response without retrying completed work'] }));
 } finally {
   await app.close();
 }

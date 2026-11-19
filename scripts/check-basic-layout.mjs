@@ -15,18 +15,10 @@ try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
   await page.getByRole('button', { name: '家長設定' }).waitFor();
-  await page.evaluate(async () => {
-    const c = await window.desktop.connection();
-    await fetch(c.base + '/credentials', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + c.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ GROQ_API_KEY: 'test-only' }),
-    });
-  });
   await page.reload();
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀', exact: true }).waitFor();
   await page.route('**/sessions', (route) =>
-    route.fulfill({ json: { id: 'layout-fixture', online: true } }),
+    route.fulfill({ json: { id: 'layout-fixture', mode:'basic', teacher_name:'伴讀老師', backend:'codex', online: true } }),
   );
   await page.route('**/sessions/layout-fixture/**', (route) => route.fulfill({ json: {} }));
   await page.route('**/sessions/layout-fixture/finalize', (route) => route.fulfill({ json: {
@@ -77,7 +69,7 @@ try {
       }
     };
   });
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀', exact: true }).click();
   await page.locator('.lesson-list input').waitFor();
   await page.evaluate(() => window.desktop.focus(false));
   await app.evaluate(async ({ BrowserWindow }) => {
@@ -104,7 +96,7 @@ try {
   assert.ok(layout.chat >= 60);
   await page.screenshot({ path: 'test-results/basic-layout-compact.png' });
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀', exact: true }).waitFor();
   console.log(
     JSON.stringify({
       passed: [

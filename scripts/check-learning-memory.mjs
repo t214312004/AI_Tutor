@@ -11,12 +11,20 @@ execFileSync(
     `
 from pathlib import Path
 from server.test_support import SeededStore as Store
-s=Store(Path('.local/electron-test/data'))
+root=Path('.local/electron-test/data')
+root.mkdir(parents=True,exist_ok=True)
+s=Store(root)
 with s.student('student-4') as db:
+  db.execute('DELETE FROM learning_attempt_edits')
+  db.execute('DELETE FROM learning_attempts')
+  db.execute('DELETE FROM practice_settings')
   db.execute('DELETE FROM learning_edits')
+  db.execute('DELETE FROM learning_sources')
   db.execute('DELETE FROM learning_evidence')
   db.execute('DELETE FROM learning_overrides')
   db.execute('DELETE FROM events')
+  db.execute('DELETE FROM session_reviews')
+  db.execute('DELETE FROM session_finalizations')
   db.execute('DELETE FROM sessions')
 sid=s.start('student-4','basic','合成測試')
 s.record_learning_evidence('student-4',sid,{'code':'N-4-5','subject':'數學','label':'同分母分數',
@@ -52,6 +60,36 @@ try {
   );
   page.once('dialog', (dialog) => void dialog.accept());
   await page.getByRole('button', { name: '排除這筆' }).click();
+  const practice = page.getByRole('region', { name: '練習與獨立作答' });
+  await practice.getByRole('checkbox', { name: '允許老師邀請短檢查' }).check();
+  await practice.getByText('設定已儲存', { exact: true }).waitFor();
+  await practice.getByText('核對教學示例', { exact: false }).click();
+  const card = practice.locator('.teaching-card').filter({ hasText: '同一整體、同分母' });
+  await card.getByRole('checkbox').check();
+  await practice.getByText('核對教學示例（1 張已確認）').waitFor();
+  await practice.getByText('補記一次作答', { exact: true }).click();
+  const form = practice.locator('form');
+  await form.getByLabel('概念', { exact: true }).fill('同分母分數');
+  await form.getByLabel('題目', { exact: true }).fill('同樣大小的整體，4/7和6/7哪個大？');
+  await form.getByLabel('作答原文', { exact: true }).fill('6/7，因為每份一樣大，取六份比較多。');
+  await form.getByLabel('檢查階段').selectOption('immediate_check');
+  await form.getByLabel('核對依據').fill('家長核對等分圖，孩子沒有看解答。');
+  await form.getByRole('button', { name: '保存待核對作答' }).click();
+  const attempt = practice.locator('.practice-attempt').first();
+  await attempt.locator('.practice-attempt-heading span', { hasText: '待核對' }).waitFor();
+  await attempt.getByText('核對、修正或排除').click();
+  await attempt.getByLabel('家長核對結果').selectOption('correct');
+  await attempt.getByRole('button', { name: '儲存練習複核' }).click();
+  await practice.getByText('家長已核對本次無即時提示的正確作答', { exact: false }).waitFor();
+  await practice.getByText('核對教學示例', { exact: false }).click();
+  await practice.locator('h3').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'test-results/learning-practice-reviewed.png', fullPage: true });
+  await practice.locator('.practice-attempt').getByText('核對、修正或排除').click();
+  page.once('dialog', (dialog) => void dialog.accept());
+  await practice.getByRole('button', { name: '排除練習紀錄' }).click();
+  await practice.getByText('尚無練習紀錄；這不表示孩子不會。').waitFor();
+  await practice.locator('h3').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: 'test-results/learning-practice-parent.png', fullPage: true });
   const records = await page.evaluate(async () => {
     const connection = await window.desktop.connection();
     const read = async (id) =>
@@ -79,6 +117,9 @@ try {
         'evidence corrected',
         'evidence excluded',
         'student isolation',
+        'practice opt-in and card review',
+        'independent answer parent review',
+        'practice exclusion',
       ],
     }),
   );
@@ -91,12 +132,20 @@ try {
       `
 from pathlib import Path
 from server.test_support import SeededStore as Store
-s=Store(Path('.local/electron-test/data'))
+root=Path('.local/electron-test/data')
+root.mkdir(parents=True,exist_ok=True)
+s=Store(root)
 with s.student('student-4') as db:
+  db.execute('DELETE FROM learning_attempt_edits')
+  db.execute('DELETE FROM learning_attempts')
+  db.execute('DELETE FROM practice_settings')
   db.execute('DELETE FROM learning_edits')
+  db.execute('DELETE FROM learning_sources')
   db.execute('DELETE FROM learning_evidence')
   db.execute('DELETE FROM learning_overrides')
   db.execute('DELETE FROM events')
+  db.execute('DELETE FROM session_reviews')
+  db.execute('DELETE FROM session_finalizations')
   db.execute('DELETE FROM sessions')
 `,
     ],

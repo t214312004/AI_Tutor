@@ -3,11 +3,8 @@ chcp 65001 >nul
 setlocal
 title AI陪讀老師 - 啟動中
 pushd "%~dp0"
-set "npm_config_cache=%~dp0.local\npm-cache"
-set "TEMP=%~dp0app-data\temp"
-set "TMP=%~dp0app-data\temp"
-if not exist "%TEMP%" mkdir "%TEMP%"
 if errorlevel 1 goto directory_error
+set "npm_config_cache=%~dp0.local\npm-cache"
 
 where node.exe >nul 2>&1
 if errorlevel 1 goto node_missing

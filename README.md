@@ -2,16 +2,12 @@
 
 Windows 上的開源家庭作業陪讀助手，結合書桌相機、語音、教學白板與可修正的學習記憶。繁體中文優先，供家長陪同試用。
 
-**目前是實驗版。** 本機工作區與合成測試可運作；外部 AI 路由的接線、真實服務測試與真人教學驗收分開標示。原始碼免費，AI 訂閱及 API 費用由使用者負擔。
+桌面提供兩個訂閱語音模式。課堂流程、白板、作業清單與照片索引共用一套程式。
 
-| 模式 | 所需服務 | 狀態 |
+| 模式 | 登入 | 驗證範圍 |
 |---|---|---|
-| 本機專注工作區 | 無 AI 金鑰 | 相機校正、白板與課堂紀錄可使用；沒有 AI 教學 |
-| 基本陪讀 | Groq 轉錄、Codex 或 agy、Edge TTS | 已接線；既有真實短測及合成整合測試，仍需完整教學驗收 |
-| OpenAI Live | OpenAI key，依設定選教學及圖片服務 | 已接線；完成真實 API 短測，持續收音與大圖片用 mock 驗證 |
-| Gemini Live | Gemini key 與 CLI 委派 | 已接線但尚未完成真實 key 驗收；用途資格需另核對 |
-
-Google Gemini Developer API 的 [現行條款](https://ai.google.dev/gemini-api/terms) 對未滿 18 歲使用者及可能由其使用的應用有限制（核對日期：2026-10-01）；此接線不可視為已確認適用兒童陪讀。其他服務也須按最新條款與帳號權限確認用途。公開程式碼不代表供應商已核准所有使用情境。
+| Codex Live | ChatGPT／Codex | 真實訂閱合成語音、照片與白板流程已測 |
+| agy Live | Google／Antigravity | 桌面以真實訂閱及合成輸入驗證雙向語音、獨立 ACP 看圖、白板確認及停播重連。實體裝置與長課堂待驗收 |
 
 ## 安裝與啟動
 
@@ -36,15 +32,13 @@ Electron 執行檔由官方 Release 下載，並以 npm 套件附帶的 SHA-256 
 
 ## 第一次使用
 
-1. 新安裝是空白學生名單，輸入暱稱與年級後按「新增學生」。
-2. 可先關閉不需要的相機，或校正方向與拍攝範圍。
-3. 未設定 AI key 時，基本模式可進入本機專注工作區。
-4. 若只想看展示，空白資料庫可按「載入合成展示資料」，建立虛構學生與學校。
-5. 家長設定可修改學生、查看紀錄與設定服務金鑰；AI 模式開始前會核對所選服務。
+1. 新安裝會顯示空白學生名單，可新增學生或載入合成展示資料。
+2. 選 Codex Live 或 agy Live。Codex 可用 [登入腳本](scripts/login-codex.ps1)。使用 agy 時先安裝官方 CLI，從桌面按「agy 首次設定」，在開啟的視窗自行完成選擇及必要的登入。進入主畫面後輸入「/exit」返回桌面。
+3. 依需要校正相機，選擇「檢查訂閱並開始陪讀」。只有所選的訂閱服務會處理這堂課。
+4. 照片辨識完成後，Codex 的課堂脈絡更新短引用。agy 在下一次原生語音交接時取得短引用。老師需要時才查詢辨識內容，agy 的白板提案會在課堂畫面等待確認。
+5. 可查看舊課堂、作業和學習記憶。具備有效檢查點的中斷課堂可從已提交資料接續。舊模式接續時會使用課前選定的訂閱語音。
 
-無金鑰展示不提供模擬老師冒充真正的 AI 教學。開發者可執行 `test:first-run`、`test:ui` 及其他 mock 腳本驗證整合流程。
-
-基本模式需設定 Groq key，並登入選用的 CLI。Codex 登入輔助指令為 `scripts/login-codex.ps1`；agy 為外部可選 CLI，需由使用者另行安裝及登入。GPT 模式的教學與圖片路由各自指定 provider、模型及 effort。模型可用性依服務端及帳號權限決定，缺少服務時會顯示錯誤。
+在「家長設定 → 學習紀錄 → 練習與獨立作答」可選用短檢查、核對教學示例，以及補記／複核孩子的作答。短檢查預設關閉，啟用後仍先徵求孩子同意；每次一兩題，結束時立即停止。AI 紀錄先列待核對，沒有觀察到不算答錯，也不自動判定已掌握。詳見 [陪讀與教學驗收](docs/public/teaching-validation.md)。
 
 ## 資料位置
 
@@ -57,7 +51,7 @@ npm start
 
 既有使用者可以保留原本資料位置、學生 ID 與紀錄；亦可使用不公開的 `app-data/local-settings.json` 指定本機資料根。資料夾可留在原始碼旁，但仍須排除於版本控制與發布。詳見 [資料位置、傳輸與清除](docs/public/privacy.md)。
 
-課前預覽不會上傳照片；課中 AI 模式會依路由傳送音訊、文字或校正後的照片。API key 使用 Windows 同機 DPAPI 加密，CLI 授權按 Windows 帳號隔離。學習記憶、照片、語音、金鑰及診斷資料應留在自己的資料根。
+課前預覽只在本機顯示。課堂音訊與文字交所選的語音服務，原圖交同一訂閱的獨立看圖角色。程式不讀取舊版保存的 API 金鑰。
 
 ## 課綱
 
@@ -74,19 +68,28 @@ npm start
 ```powershell
 npm run build
 npm test
-.\.venv\Scripts\python.exe -m unittest discover -s server -t .
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s server -t .
 npm run test:storage
 npm run test:first-run
+npm run test:native-voice-ui
 npm run test:ui
+npm run test:lifecycle
+npm run test:post-lesson
+npm run test:learning-memory
+npm run test:usability
+npm run test:ui-polish
 npm run test:camera
 .\.venv\Scripts\python.exe scripts/audit_public.py
 ```
 
 自動測試使用合成學生／相機及隔離資料根，不需要真人資料或 API key。需要外部服務、真實相機或可能收費的診斷腳本屬手動測試，見 [參與開發](CONTRIBUTING.md)。
 
+桌面測試腳本共用預設測試資料根，請依序執行。
+
 ## 文件與後續工作
 
 - [架構](docs/public/architecture.md)
+- [Codex 訂閱語音使用方式與驗證範圍](docs/public/native-subscription-voice.md)
 - [資料與隱私](docs/public/privacy.md)
 - [發布與稽核](docs/public/releasing.md)
 - [安全回報](SECURITY.md)

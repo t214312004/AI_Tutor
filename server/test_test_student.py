@@ -1,6 +1,5 @@
 from .test_support import install_test_seed
 import importlib
-import json
 import os
 import tempfile
 import time
@@ -54,7 +53,6 @@ class TestStudentTests(unittest.TestCase):
     def test_identity_defaults_for_student_test(self):
         profile = student_profile('student-test')
         self.assertEqual(profile['teacher_name'], '伴讀老師')
-        self.assertEqual(profile['edge_voice'], 'zh-TW-HsiaoYuNeural')
 
     def test_test_student_keeps_session_summary_without_concept_assessment(self):
         store = Store(Path(self.folder.name))
@@ -140,59 +138,7 @@ class TestStudentTests(unittest.TestCase):
         self.assertEqual(st['preferences'], '家長偏好：請以問句引導。')
         self.assertEqual(st['grade'], 2)
 
-    def test_online_test_student_creates_session_review_folder(self):
-        from .test_basic import Speech
-        from .test_basic_workspace import RecordingTutor
-        self.module.keys['GROQ_API_KEY'] = 'test-only'
-        with patch('server.providers.LazyCodex', side_effect=lambda *args: RecordingTutor()), \
-             patch('server.basic.SpeechService', return_value=Speech()):
-            response = self.client.post('/sessions', json={
-                'student_id': 'student-test', 'mode': 'basic'}, headers=self.headers)
-            self.assertEqual(response.status_code, 200)
-            sid = response.json()['id']
-            review = self.module.ROOT / 'runtime' / 'student-test' / 'audit' / sid
-            self.assertTrue((review / 'lesson.jsonl').exists())
-            self.assertTrue((review / 'AGENTS.md').exists())
-            self.module.diagnostics.info('synthetic_transport_step')
-            event = self.client.post(f'/sessions/{sid}/events', json={
-                'kind': 'client_diagnostic', 'payload': {'event': 'camera_error', 'detail': 'synthetic'}},
-                headers=self.headers)
-            self.assertEqual(event.status_code, 200)
-            ended = self.client.post(f'/sessions/{sid}/end', json={}, headers=self.headers)
-            self.assertEqual(ended.status_code, 200)
-            self.assertTrue((review / 'workspace-after' / 'AGENTS.md').exists())
-            log = [json.loads(line) for line in (review / 'lesson.jsonl').read_text(encoding='utf-8').splitlines()]
-            self.assertTrue(any(item['kind'] == 'core_diagnostic' and
-                                item['message'] == 'synthetic_transport_step' for item in log))
-            self.assertTrue(any(item['kind'] == 'lesson_event' and
-                                item['event_kind'] == 'client_diagnostic' for item in log))
-            self.assertTrue(any(item['kind'] == 'session_closed' for item in log))
-            cleared = self.client.delete('/students/student-test/history', headers=self.headers)
-            self.assertEqual(cleared.status_code, 200)
-            self.assertFalse(review.exists())
 
-    def test_finalization_snapshots_post_lesson_workspace(self):
-        self.module.runtime_factory = None
-        started = self.client.post('/sessions', json={
-            'student_id': 'student-test', 'mode': 'basic'}, headers=self.headers)
-        self.assertEqual(started.status_code, 200)
-        sid = started.json()['id']
-        workspace = self.module.ROOT / 'runtime' / 'student-test' / 'post-lesson' / sid
-        workspace.mkdir(parents=True)
-        (workspace / 'notes.txt').write_text('課後分析工作資料', encoding='utf-8')
-        result = self.client.post(f'/sessions/{sid}/finalize', json={}, headers=self.headers)
-        self.assertEqual(result.status_code, 200)
-        for _ in range(40):
-            status = self.client.get(f'/sessions/{sid}/finalization', headers=self.headers).json()
-            if status['state'] == 'completed':break
-            time.sleep(.05)
-        self.assertEqual(status['state'], 'completed')
-        review = self.module.ROOT / 'runtime' / 'student-test' / 'audit' / sid
-        for _ in range(40):
-            if (review / 'post-lesson-workspace' / 'notes.txt').exists():break
-            time.sleep(.05)
-        self.assertEqual((review / 'post-lesson-workspace' / 'notes.txt').read_text(encoding='utf-8'),
-                         '課後分析工作資料')
 
     def test_audit_write_failure_does_not_strand_finalization(self):
         self.module.runtime_factory = None

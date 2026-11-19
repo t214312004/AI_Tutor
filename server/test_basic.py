@@ -3,7 +3,8 @@ import json
 import unittest
 import time
 from unittest.mock import patch
-from .basic import BasicRuntime,LatestObservation,SpeechService,sanitize_transcript
+from .basic import BasicRuntime,sanitize_transcript
+from .classroom_runtime import LatestObservation
 from .tutor import TutorEngine,TutorSession
 
 class Teacher:
@@ -14,29 +15,31 @@ class Teacher:
         if 'lesson' in kwargs.get('schema',{}).get('properties',{}):
             from .lesson import empty_lesson
             result['lesson']=empty_lesson()
+        if 'interaction' in kwargs.get('schema',{}).get('properties',{}):
+            result['interaction']={'mode':'unchanged','reason':''};result['learning']=[]
         return json.dumps(result)
 class Speech:
     async def transcribe(self,pcm):return '七加五怎麼算？'
     async def synthesize(self,text):return {'audio':'','boundaries':[],'text':text}
 
 class BasicTests(unittest.IsolatedAsyncioTestCase):
-    async def test_stt_does_not_seed_teacher_sentence_and_rejects_legacy_echo(self):
-        calls=[]
-        class Response:
-            is_success=True
-            def json(self):return {'text':'使用者會稱呼老師叫小優老師。',
-                                    'segments':[{'no_speech_prob':0.2}]}
-        class Client:
-            def __init__(self,**kwargs):pass
-            async def __aenter__(self):return self
-            async def __aexit__(self,*args):pass
-            async def post(self,*args,**kwargs):
-                calls.append(kwargs['data']);return Response()
-        with patch('server.basic.httpx.AsyncClient',Client):
-            result=await SpeechService('synthetic',teacher_name='小優老師').transcribe(b'\0\0'*16000)
-        self.assertNotIn('prompt',calls[0])
-        self.assertEqual(result['text'],'')
-        self.assertTrue(result['quality']['rejected'])
+    async def test_close_stops_all_providers_even_when_saving_fails(self):
+        from unittest.mock import AsyncMock,Mock
+        from types import SimpleNamespace
+        for checkpoint_failure in (True,False):
+            runtime=self.make();runtime.session.basic_workflow=True
+            teacher=SimpleNamespace(close=AsyncMock())
+            observer=SimpleNamespace(close=AsyncMock())
+            runtime.teacher.provider=teacher;runtime.observer.provider=observer
+            if checkpoint_failure:
+                runtime.collaboration=SimpleNamespace(checkpoint=Mock(side_effect=OSError('disk full')),close=AsyncMock())
+            else:
+                runtime.persist=Mock(side_effect=OSError('disk full'))
+            with self.assertRaises(OSError):await runtime.close()
+            self.assertFalse(runtime.session.active)
+            self.assertFalse(runtime.mic_enabled)
+            teacher.close.assert_awaited_once();observer.close.assert_awaited_once()
+
 
     async def test_invalid_teaching_json_retries_once_without_applying_first_reply(self):
         class Flaky(Teacher):
@@ -213,6 +216,13 @@ class BasicTests(unittest.IsolatedAsyncioTestCase):
         ref={'code':'N-1-3','subject':'數學','kind':'學習內容','grade_min':1,'grade_max':1,
              'summary':'基本加減法：以操作活動為主','source_title':'數學課綱',
              'page':22,'source_url':'https://example.test/math','quality':'auto_math_row'}
+        runtime.session.input_speaker='student'
+        respond=runtime.teacher.respond
+        async def approved(*args,**kwargs):
+            result=await respond(*args,**kwargs)
+            result['learning']=[{'code':'N-1-3','quote':'七加五怎麼算？','reason':'學生明確請教加法'}]
+            return result
+        runtime.teacher.respond=approved
         with patch('server.tutor.teaching_references',return_value=[ref]):
             runtime.accept_text('七加五怎麼算？')
             await asyncio.gather(*runtime.voice_tasks)
@@ -238,9 +248,10 @@ class BasicTests(unittest.IsolatedAsyncioTestCase):
                        'camera_epoch':0,'received':time.monotonic()}
                 await runtime.observe(frame)
                 if index==1:runtime.signal_since-=11
-        evidence=[payload for kind,payload in self.saved if kind=='learning_evidence']
-        self.assertEqual(len(evidence),1)
-        self.assertEqual(evidence[0]['kind'],'observed_step')
+        self.assertFalse(any(kind=='learning_evidence' for kind,_ in self.saved))
+        candidates=[payload for kind,payload in self.saved if kind=='learning_candidate']
+        self.assertEqual(len(candidates),1)
+        self.assertEqual(candidates[0]['kind'],'observed_step')
         await runtime.close()
 
     def test_sanitize_transcript_filters_hallucinations_and_high_no_speech(self):

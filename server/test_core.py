@@ -8,6 +8,20 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from .test_support import SeededStore as Store
 
+class LifespanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_releases_active_runtime(self):
+        from unittest.mock import AsyncMock, Mock
+        from . import app
+        closing=Mock(close=AsyncMock(return_value={}))
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(app,'ROOT',Path(directory)),patch.object(app,'store',None), \
+             patch.object(app,'bridge',closing),patch.object(app,'active',{'id':'synthetic'}), \
+             patch.dict(os.environ,{'TUTOR_PARENT_WATCH':'0','TUTOR_TEST_MODE':'0'}):
+            async with app.lifespan(app.app):pass
+            closing.close.assert_awaited_once()
+            self.assertIsNone(app.active)
+            self.assertIsNone(app.bridge)
+
 class StorageTests(unittest.TestCase):
     def setUp(self):
         self.folder=tempfile.TemporaryDirectory()
@@ -102,6 +116,7 @@ class ApiTests(unittest.TestCase):
         os.environ['TUTOR_CORE_TOKEN']='test-token'
         from . import app
         self.module=importlib.reload(app)
+        self.module.runtime_factory=None
         self.client=TestClient(self.module.app)
         self.client.__enter__()
         self.headers={'Authorization':'Bearer test-token'}
@@ -117,6 +132,50 @@ class ApiTests(unittest.TestCase):
         self.client.post(f'/sessions/{sid}/end',json={},headers=self.headers)
         r=self.client.post(f'/sessions/{sid}/events',json={'kind':'student_note','payload':{}},headers=self.headers)
         self.assertEqual(r.status_code,409)
+
+    def test_evidence_correction_cors_preflight(self):
+        response=self.client.options('/students/student-2/learning/evidence/example',headers={
+            'Origin':'http://127.0.0.1:5173',
+            'Access-Control-Request-Method':'PATCH',
+            'Access-Control-Request-Headers':'authorization,content-type'})
+        self.assertEqual(response.status_code,200)
+        self.assertIn('PATCH',response.headers['access-control-allow-methods'])
+
+    def test_invalid_content_length_returns_client_error(self):
+        for value in ('invalid','-1'):
+            response=self.client.get('/bootstrap',headers={**self.headers,'Content-Length':value})
+            self.assertEqual(response.status_code,400)
+
+    def test_concurrent_starts_do_not_orphan_a_session(self):
+        import asyncio
+        from fastapi import HTTPException
+        async def factory(state):
+            await asyncio.sleep(.01)
+            return None
+        self.module.runtime_factory=factory
+        async def concurrent():
+            body=self.module.Start(student_id='student-2',mode='basic',teacher_route={'provider':'codex'})
+            return await asyncio.gather(self.module.start(body),self.module.start(body),return_exceptions=True)
+        results=self.client.portal.call(concurrent)
+        self.assertEqual(sum(isinstance(result,dict) for result in results),1)
+        failures=[result for result in results if isinstance(result,HTTPException)]
+        self.assertEqual([result.status_code for result in failures],[409])
+        sessions=self.module.store.history('student-2')['sessions']
+        self.assertEqual(len(sessions),1)
+        self.client.post('/sessions/'+sessions[0]['id']+'/end',headers=self.headers)
+
+    def test_clear_history_removes_reviews_and_evidence_source_keys(self):
+        sid=self.module.store.start('student-2','basic','')
+        self.module.store.record_learning_evidence('student-2',sid,{
+            'code':'N-2-2','subject':'數學','label':'加法','kind':'asked_for_help',
+            'quote':'這題不會','origin':'student_utterance','source_page':12,'source_id':'test-source'})
+        self.module.store.finish('student-2',sid)
+        self.module.store.set_session_context('student-2',sid,False,'家長排除')
+        response=self.client.delete('/students/student-2/history',headers=self.headers)
+        self.assertEqual(response.status_code,200,response.text)
+        with self.module.store.student('student-2') as db:
+            for table in ('sessions','session_reviews','learning_sources','learning_evidence'):
+                self.assertEqual(db.execute('SELECT COUNT(*) FROM '+table).fetchone()[0],0)
     def test_offline_finalization_returns_only_after_saved(self):
         import time
         body={'student_id':'student-2','mode':'basic','notes':'test'}
@@ -139,98 +198,28 @@ class ApiTests(unittest.TestCase):
         second=self.client.post('/sessions',json=body,headers=self.headers)
         self.assertEqual(second.status_code,200)
         self.client.post(f"/sessions/{second.json()['id']}/end",headers=self.headers)
-    def test_online_finalization_commits_ai_summary(self):
-        import time
-        from types import SimpleNamespace
-        from unittest.mock import AsyncMock
-        async def runtime_factory(state):
-            async def close():return {'usd':0,'status':'test'}
-            return SimpleNamespace(session=SimpleNamespace(id=state['id']),close=close)
-        self.module.runtime_factory=runtime_factory
-        answer={key:[] for key in ('highlights','difficulties','guidance','next_steps','uncertainties')}
-        with patch('server.post_lesson.analyze',new_callable=AsyncMock,return_value=(answer,'codex',1)) as analyze:
-            started=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers).json()
-            sid=started['id'];self.assertTrue(started['online'])
-            self.module.store.event('student-2',sid,'student_utterance',{'text':'這題我需要提示'})
-            self.client.post(f'/sessions/{sid}/finalize',json={},headers=self.headers)
-            for _ in range(40):
-                status=self.client.get(f'/sessions/{sid}/finalization',headers=self.headers).json()
-                if status['state']=='completed':break
-                time.sleep(.05)
-            self.assertEqual(status['state'],'completed')
-            self.assertTrue(status['summary_available'])
-            self.assertEqual(analyze.await_count,1)
-            history=self.client.get('/students/student-2/history',headers=self.headers).json()
-            self.assertEqual(history['learning_context'][0]['analysis'],answer)
-    def test_failed_analysis_can_be_retried_without_duplicate_session(self):
-        import time
-        from types import SimpleNamespace
-        from unittest.mock import AsyncMock
-        async def runtime_factory(state):
-            async def close():return {'usd':0,'status':'test'}
-            return SimpleNamespace(session=SimpleNamespace(id=state['id']),close=close)
-        self.module.runtime_factory=runtime_factory
-        answer={key:[] for key in ('highlights','difficulties','guidance','next_steps','uncertainties')}
-        with patch('server.post_lesson.analyze',new_callable=AsyncMock,
-                   side_effect=[RuntimeError('provider'),RuntimeError('provider'),(answer,'codex',1)]) as analyze:
-            sid=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers).json()['id']
-            self.module.store.event('student-2',sid,'student_utterance',{'text':'要提示'})
-            self.client.post(f'/sessions/{sid}/finalize',json={},headers=self.headers)
-            for _ in range(70):
-                status=self.client.get(f'/sessions/{sid}/finalization',headers=self.headers).json()
-                if status['state']=='failed':break
-                time.sleep(.05)
-            self.assertEqual(status['state'],'failed')
-            self.assertTrue(status['snapshot_saved'])
-            self.client.post(f'/sessions/{sid}/finalization/retry',json={},headers=self.headers)
-            for _ in range(40):
-                status=self.client.get(f'/sessions/{sid}/finalization',headers=self.headers).json()
-                if status['state']=='completed':break
-                time.sleep(.05)
-            self.assertEqual(status['state'],'completed')
-            self.assertEqual(analyze.await_count,3)
-            self.assertEqual(len([s for s in self.module.store.history('student-2')['sessions'] if s['id']==sid]),1)
     def test_unknown_modes_rejected(self):
         r=self.client.post('/sessions',json={'student_id':'student-2','mode':'fake'},headers=self.headers)
         self.assertEqual(r.status_code,422)
         missing=self.client.post('/sessions',json={'student_id':'missing','mode':'basic'},headers=self.headers)
         self.assertEqual(missing.status_code,404)
 
-    def test_gpt_delegation_switch_is_validated_per_new_session(self):
-        from unittest.mock import AsyncMock
-        from .gpt_config import api_models
-        responses={'version':1,'delegation':{'type':'responses','provider':'openai',
-                   'model':'gpt-6.1-sol','effort':'low'},
-                   'vision':{'provider':'openai','model':'gpt-6-luna','effort':'max'}}
-        client={**responses,'delegation':{'type':'client','provider':'codex',
-                'model':'gpt-6.1-sol','effort':'medium'}}
-        options={'openai':{'models':api_models(),'error':None},
-                 'codex':{'models':[{'id':'gpt-6.1-sol','label':'Sol',
-                                    'efforts':['low','medium'],'image':True}], 'error':None}}
-        self.assertEqual(self.client.post('/sessions',json={
-            'student_id':'student-2','mode':'gpt','gpt_live':responses},
-            headers=self.headers).status_code,503)
-        self.module.keys['OPENAI_API_KEY']='test-key'
-        seen=[]
-        async def runtime_factory(state):
-            seen.append(state['gpt_live'])
-            return None
-        self.module.runtime_factory=runtime_factory
-        with patch('server.gpt_config.route_options',new_callable=AsyncMock,return_value=options),\
-             patch('server.gpt_config.verify_openai_models',new_callable=AsyncMock) as verify:
-            for config in (responses,client):
-                started=self.client.post('/sessions',json={
-                    'student_id':'student-2','mode':'gpt','gpt_live':config},
-                    headers=self.headers)
-                self.assertEqual(started.status_code,200,started.text)
-                self.assertEqual(started.json()['gpt_live']['delegation']['type'],
-                                 config['delegation']['type'])
-                self.assertEqual(self.client.post(
-                    f"/sessions/{started.json()['id']}/end",headers=self.headers).status_code,200)
-            self.assertEqual(verify.await_count,2)
-        self.assertEqual([item['delegation']['type'] for item in seen],['responses','client'])
-        self.assertEqual(seen[0]['vision']['model'],'gpt-6-luna')
-        self.assertEqual(seen[1]['delegation']['effort'],'medium')
+    def test_only_subscription_modes_can_start_and_old_key_routes_are_gone(self):
+        bootstrap = self.client.get('/bootstrap', headers=self.headers).json()
+        self.assertEqual(set(bootstrap['capabilities']), {'codex', 'agy'})
+        for mode in ('gpt', 'gemini'):
+            response = self.client.post('/sessions', json={'student_id': 'student-2', 'mode': mode},
+                                        headers=self.headers)
+            self.assertEqual(response.status_code, 422)
+        for route in ('/credentials', '/transcribe', '/diagnostics/tts'):
+            self.assertEqual(self.client.post(route, json={}, headers=self.headers).status_code, 404)
+        for engine in ('codex', 'agy'):
+            response = self.client.post('/sessions', json={'student_id': 'student-2', 'basic_voice': engine},
+                                        headers=self.headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['backend'], engine)
+            self.client.post(f"/sessions/{response.json()['id']}/end", headers=self.headers)
+
 
     def test_each_student_has_independent_school_context(self):
         original=self.client.get('/bootstrap',headers=self.headers).json()
@@ -306,109 +295,11 @@ class ApiTests(unittest.TestCase):
         self.assertTrue((workspace/'note.txt').exists())
         self.client.post('/sessions/'+response.json()['id']+'/end',headers=self.headers)
 
-    def test_basic_route_enabled_by_key_and_cost_saved(self):
-        from .test_basic import Teacher,Speech
-        self.module.keys['GROQ_API_KEY']='test-only'
-        with patch('server.providers.LazyCodex',side_effect=lambda *args:Teacher()),patch('server.basic.SpeechService',return_value=Speech()):
-            response=self.client.post('/sessions',json={'student_id':'student-4','mode':'basic'},headers=self.headers)
-            self.assertTrue(response.json()['online']);sid=response.json()['id']
-            self.assertEqual(self.module.bridge.runtime.session.grade,4)
-            with self.client.websocket_connect(f'/sessions/{sid}/stream') as ws:
-                ws.send_json({'type':'authenticate','token':'test-token'})
-                self.assertEqual(ws.receive_json()['type'],'ready')
-                ws.send_json({'type':'audio','session_id':sid,'pcm':'AAA='})
-                events=[]
-                while not events or events[-1]['type']!='speech':
-                    events.append(ws.receive_json())
-                self.assertIn('audio_status',[event['type'] for event in events])
-                ws.send_json({'type':'close','session_id':sid})
-                self.assertEqual(ws.receive_json()['type'],'closed')
-            self.client.post(f'/sessions/{sid}/end',json={},headers=self.headers)
-        history=self.client.get('/students/student-4/history',headers=self.headers).json()
-        self.assertTrue(any(e['kind']=='session_cost' for e in history['events']))
-        self.assertEqual(self.client.get('/students/student-2/history',headers=self.headers).json()['events'],[])
 
-    def test_basic_teacher_and_observer_use_selected_backend(self):
-        from .test_basic import Teacher,Speech
-        self.module.keys['GROQ_API_KEY']='test-only'
-        with patch('server.providers.LazyCodex',side_effect=lambda *args:Teacher()) as codex, \
-             patch('server.providers.AgyTutor',side_effect=lambda *args:Teacher()) as agy, \
-             patch('server.basic.SpeechService',return_value=Speech()):
-            workdirs=[]
-            for backend,selected,other in [('agy',agy,codex),('codex',codex,agy)]:
-                selected.reset_mock();other.reset_mock()
-                response=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic','backend':backend},headers=self.headers)
-                self.assertTrue(response.json()['online'])
-                self.assertEqual(selected.call_count,1)
-                runtime=self.module.bridge.runtime
-                self.assertIs(runtime.teacher,runtime.observer)
-                workdir=selected.call_args.args[0]
-                workdirs.append(workdir)
-                self.assertTrue((workdir/'AGENTS.md').exists())
-                other.assert_not_called()
-                self.client.post('/sessions/'+response.json()['id']+'/end',headers=self.headers)
-                self.assertTrue((workdir/'AGENTS.md').exists())
-            self.assertEqual(*workdirs)
 
-    def test_new_basic_session_recovers_workspace_and_previous_summary(self):
-        from .test_basic import Teacher,Speech
-        self.module.keys['GROQ_API_KEY']='test-only'
-        with patch('server.providers.LazyCodex',side_effect=lambda *args:Teacher()), \
-             patch('server.basic.SpeechService',return_value=Speech()):
-            first=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers).json()
-            original=self.module.bridge.runtime
-            workdir=original.photo_workspace.root
-            (workdir/'teacher-notes.txt').write_text('下次先看位值',encoding='utf-8')
-            original.session.heard_history.append({'role':'user','text':'進位還不熟'})
-            self.client.post('/sessions/'+first['id']+'/end',headers=self.headers)
-            second=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers).json()
-            restored=self.module.bridge.runtime
-            self.assertNotEqual(first['id'],second['id'])
-            self.assertEqual(restored.photo_workspace.root,workdir)
-            self.assertEqual((workdir/'teacher-notes.txt').read_text(encoding='utf-8'),'下次先看位值')
-            self.assertEqual(restored.session.memory[0]['student_questions'],['進位還不熟'])
-            self.assertEqual(restored.session.workspace_context['photo_archive'],'internal/photos/')
-            self.client.post('/sessions/'+second['id']+'/end',headers=self.headers)
 
-    def test_basic_rejects_unavailable_selected_cli_before_stream(self):
-        from .providers import ProviderError
-        self.module.keys['GROQ_API_KEY']='test-only'
-        class Unavailable:
-            def __init__(self,*args):pass
-            async def ensure_ready(self):raise ProviderError('Codex 尚未登入此 Windows 帳號')
-        with patch('server.providers.LazyCodex',Unavailable):
-            response=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers)
-        self.assertEqual(response.status_code,503)
-        self.assertIn('Codex 尚未登入',response.json()['detail'])
-        self.assertIsNone(self.module.active)
-        self.assertIsNone(self.module.bridge)
 
-    def test_live_runtime_is_provisioned_without_policy_gate(self):
-        for mode,key in [('gpt','OPENAI_API_KEY'),('gemini','GEMINI_API_KEY')]:
-            self.module.keys[key]='test-only'
-            response=self.client.post('/sessions',json={'student_id':'student-2','mode':mode},headers=self.headers)
-            self.assertTrue(response.json()['online'])
-            # No socket connection means no provider API is called by this test.
-            self.assertEqual(self.module.bridge.runtime.mode,mode)
-            self.client.post('/sessions/'+response.json()['id']+'/end',json={},headers=self.headers)
 
-    def test_live_ignores_basic_backend_selection(self):
-        from .test_basic import Teacher
-        self.module.keys['OPENAI_API_KEY']='test-only'
-        self.module.keys['GEMINI_API_KEY']='test-only'
-        with patch('server.providers.FailoverTutor',side_effect=lambda *args:Teacher()) as failover, \
-             patch('server.providers.AgyTutor',side_effect=AssertionError('basic agy selected')), \
-             patch('server.providers.LazyCodex',side_effect=AssertionError('basic codex selected')):
-            for mode,backend,expected in (
-                ('gpt','codex','agy_codex_failover'),
-                ('gemini','agy','gemini_native_vision_agy_codex_tutor')):
-                failover.reset_mock()
-                response=self.client.post('/sessions',json={
-                    'student_id':'student-2','mode':mode,'backend':backend},headers=self.headers)
-                self.assertTrue(response.json()['online'])
-                self.assertEqual(response.json()['backend'],expected)
-                self.assertEqual(failover.call_count,2)
-                self.client.post('/sessions/'+response.json()['id']+'/end',headers=self.headers)
 
     def test_parent_can_review_correct_and_exclude_learning_evidence(self):
         sid=self.client.post('/sessions',json={'student_id':'student-2','mode':'basic'},headers=self.headers).json()['id']
@@ -429,5 +320,36 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get('/students/student-4/history',headers=self.headers).json()['learning_profile'],[])
         self.client.delete('/students/student-2/history',headers=self.headers)
         self.assertEqual(self.client.get('/students/student-2/history',headers=self.headers).json()['learning_profile'],[])
+
+    def test_history_handles_local_finalization_with_null_analysis(self):
+        from .post_lesson import memory_payload
+        sid=self.module.store.start('student-2','basic','練習減法')
+        self.module.store.event('student-2',sid,'student_utterance',{'text':'這題借位怎麼算？'})
+        self.module.store.begin_finalization('student-2',sid,online=True,backend='codex')
+        snapshot=self.module.store.freeze_finalization('student-2',sid)
+        payload=memory_payload(snapshot)
+        self.assertIsNone(payload['analysis'])
+        self.module.store.complete_finalization('student-2',sid,payload)
+        res=self.client.get('/students/student-2/history',headers=self.headers)
+        self.assertEqual(res.status_code,200)
+        history=res.json()
+        self.assertEqual(history['finalizations'][0]['summary']['student_questions'],['這題借位怎麼算？'])
+        self.assertIsNone(history['finalizations'][0]['summary']['analysis'])
+
+    def test_student_test_can_resume_existing_session_without_audit_collision(self):
+        first=self.client.post('/sessions',json={'student_id':'student-test','mode':'basic'},headers=self.headers)
+        self.assertEqual(first.status_code,200)
+        sid=first.json()['id']
+        # Simulate an interrupted session where the audit folder and checkpoint already exist on disk.
+        checkpoint=self.module.ROOT/'runtime'/'student-test'/'collaboration'/'lessons'/sid/'internal'/'checkpoint.json'
+        checkpoint.parent.mkdir(parents=True,exist_ok=True)
+        checkpoint.write_text('{}',encoding='utf-8')
+        self.module.finish_audit(sid)
+        self.module.store.finish('student-test',sid,'interrupted')
+        self.module.active=None
+        resumed=self.client.post('/sessions',json={'student_id':'student-test','mode':'basic','resume_session_id':sid},headers=self.headers)
+        self.assertEqual(resumed.status_code,200)
+        self.assertEqual(resumed.json()['id'],sid)
+        self.client.post(f'/sessions/{sid}/end',headers=self.headers)
 
 if __name__=='__main__':unittest.main()

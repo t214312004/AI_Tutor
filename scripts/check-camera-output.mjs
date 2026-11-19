@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { electronTestFlags } from './electron-test-flags.mjs';
 
 const app = await electron.launch({
-  args: ['.', '--test-mode', ...electronTestFlags, '--use-fake-ui-for-media-stream'],
+  args: ['.', '--test-mode', ...electronTestFlags, '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
   cwd: process.cwd(),
 });
 try {
@@ -88,7 +88,7 @@ try {
   const before = await sample('.preflight-frame canvas');
   await page.locator('button.start').click();
   await page.getByRole('button', { name: '關鏡頭', exact: true }).waitFor();
-  await page.waitForFunction(() => window.__lastCapture, { timeout: 15000 });
+  await page.waitForFunction(() => window.__lastCapture, null, { timeout: 15000 });
   await page.waitForTimeout(600);
   const lesson = await sample('.camera-view canvas');
   const captured = await page.evaluate(async () => {
@@ -147,7 +147,7 @@ try {
         JSON.stringify({ zoomedPreview, zoomedCapture }));
   assert.ok(zoomedCapture.width > 0);
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor({ timeout: 15000 });
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor({ timeout: 15000 });
   console.log(
     JSON.stringify({
       passed: [

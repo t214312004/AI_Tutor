@@ -1,12 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  appendTranscript,
-  LatestQueue,
-  Generation,
-  MicState,
-  playbackReceipt,
-  DurationLedger,
-} from './core';
+import { appendTranscript, Generation, LatestQueue } from './core';
 import { homography, defaultCorners } from './camera';
 describe('session contracts', () => {
   it('keeps only the latest queued frame without cancelling active work', async () => {
@@ -34,51 +27,6 @@ describe('session contracts', () => {
     const before = g.next();
     g.next();
     expect(g.accepts(before)).toBe(false);
-  });
-  it('preserves manual mute after playback and permits click interruption', () => {
-    const m = new MicState();
-    m.userEnabled = false;
-    m.playbackGate = true;
-    m.finished();
-    expect(m.effective).toBe(false);
-    m.playbackGate = true;
-    expect(m.click()).toBe('interrupt');
-    expect(m.effective).toBe(true);
-  });
-  it('never claims a partially played word was heard', () => {
-    const r = playbackReceipt(
-      '一起試試看',
-      [
-        { text: '一起', offset: 0, duration: 1e7 },
-        { text: '試試看', offset: 1e7, duration: 2e7 },
-      ],
-      1.5,
-    );
-    expect(r.fully_heard).toBe('一起');
-    expect(r.possibly_partial).toBe('試試看');
-  });
-  it('keeps English spacing and explicitly records the unplayed tail', () => {
-    const r = playbackReceipt(
-      'Hello, try again.',
-      [
-        { text: 'Hello', offset: 0, duration: 1e7 },
-        { text: 'try', offset: 1e7, duration: 1e7 },
-        { text: 'again', offset: 2e7, duration: 1e7 },
-      ],
-      1.5,
-    );
-    expect(r.fully_heard).toBe('Hello');
-    expect(r.possibly_partial).toBe('try');
-    expect(r.not_yet_heard).toBe(' again.');
-  });
-  it('replaces cumulative duration and aggregates reconnects', () => {
-    const l = new DurationLedger();
-    l.update('a', 30);
-    l.update('a', 60, true);
-    l.update('a', 30);
-    l.update('b', 60, true);
-    expect(l.estimateUSD).toBeCloseTo(0.1);
-    expect(l.complete).toBe(true);
   });
   it('updates one live transcript message as cumulative text arrives', () => {
     const first = appendTranscript(

@@ -11,6 +11,7 @@ const app = await electron.launch({
 try {
   const page = await app.firstWindow();
   await page.getByRole('button', { name: '家長設定' }).waitFor();
+  await page.locator('.preflight-camera').waitFor();
   const layouts = [];
   for (const size of [[1366, 768], [910, 620]]) {
     await app.evaluate(({ BrowserWindow }, target) => {
@@ -38,6 +39,10 @@ try {
       const startBottom = await page.locator('button.start').evaluate(
         element => Math.round(element.getBoundingClientRect().bottom));
       const viewportHeight = await page.evaluate(() => innerHeight);
+      if (startBottom > viewportHeight) {
+        await page.screenshot({path:'test-results/usability-overflow.png',fullPage:true});
+        console.error(JSON.stringify({size,student:index+1,startBottom,viewportHeight,layouts}));
+      }
       assert.ok(startBottom <= viewportHeight,
         `Start action for student ${index + 1} must be visible at ${size.join('x')}`);
     }
@@ -65,14 +70,11 @@ try {
   const unsavedNameShownOnHome = await page.locator('.student.selected b').textContent();
   assert.equal(unsavedNameShownOnHome, originalName,
     'Unsaved profile changes must not leak into home screen');
-  await page.getByRole('button', { name: '服務設定', exact: true }).click();
-  assert.equal(await page.getByRole('tab', { name: '服務設定' }).getAttribute('aria-selected'), 'true');
-  await page.getByRole('button', { name: '關閉設定' }).click();
   await page.reload();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   const nameAfterReload = await page.locator('.student.selected b').textContent();
   assert.equal(nameAfterReload, originalName);
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await page.getByRole('button', { name: '結束', exact: true }).waitFor();
   await page.evaluate(() => window.desktop.focus(false));
   const sessions = [];
@@ -117,7 +119,7 @@ try {
   assert.ok(expandedControlsBottom <= 512, 'Expanded camera preview must retain session controls');
   await page.getByRole('button', { name: '收起預覽' }).click();
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   const shortHomeStartBottom = await page.locator('button.start').evaluate(
     element => Math.round(element.getBoundingClientRect().bottom));
   assert.ok(shortHomeStartBottom <= 512,

@@ -5,7 +5,7 @@ import shutil
 import subprocess
 from .paths import tutor_home
 
-PROJECT = Path(__file__).resolve().parents[1]
+
 
 def codex_home():
     if os.name == 'nt':
@@ -20,7 +20,7 @@ def codex_home():
     if os.name == 'nt':
         # Personal CLI credentials must not inherit the shared student-data ACL.
         subprocess.run(['icacls', str(target.parent), '/inheritance:r', '/grant:r', f'*{sid}:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], capture_output=True, check=True, creationflags=subprocess.CREATE_NO_WINDOW)
-    source = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'auth.json'
+    source = Path(os.environ.get('CODEX_HOME') or str(Path.home() / '.codex')) / 'auth.json'
     destination = target / 'auth.json'
     # Import only this login's auth, never its agents, skills, settings or sessions.
     if source.exists() and source.resolve() != destination.resolve():

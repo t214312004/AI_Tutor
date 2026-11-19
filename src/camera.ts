@@ -39,6 +39,7 @@ function solve(a: number[][]): number[] {
     [a[i], a[pivot]] = [a[pivot], a[i]];
     if (Math.abs(a[i][i]) < 1e-9) throw new Error('校正點不可重疊或共線');
     const v = a[i][i];
+    for (let k = i; k <= n; k++) a[i][k] /= v;
     for (let j = 0; j < n; j++)
       if (j !== i) {
         const f = a[j][i];
@@ -103,7 +104,9 @@ function sourceSize(source: CameraSource) {
     ? { width: source.videoWidth, height: source.videoHeight }
     : { width: source.naturalWidth, height: source.naturalHeight };
 }
-function rotatedFrame(video: CameraSource, settings: CameraSettings, maxWidth: number) {
+let cachedRotatedCanvas: HTMLCanvasElement | null = null;
+let cachedOutputCanvas: HTMLCanvasElement | null = null;
+function rotatedFrame(video: CameraSource, settings: CameraSettings, maxWidth: number, reuse = false) {
   const input = sourceSize(video);
   if (!input.width || !input.height || (video instanceof HTMLVideoElement && video.readyState < 2))
     throw new Error('相機尚未提供畫面');
@@ -114,10 +117,16 @@ function rotatedFrame(video: CameraSource, settings: CameraSettings, maxWidth: n
     settings.rotation + settings.fineRotation,
   );
   const scale = Math.min(1, maxWidth / size.width);
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(size.width * scale));
-  canvas.height = Math.max(1, Math.round(size.height * scale));
+  const canvas = reuse ? (cachedRotatedCanvas ??= document.createElement('canvas')) : document.createElement('canvas');
+  const width = Math.max(1, Math.round(size.width * scale));
+  const height = Math.max(1, Math.round(size.height * scale));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.translate(canvas.width / 2, canvas.height / 2);
   ctx.rotate(radians);
   ctx.drawImage(
@@ -157,10 +166,11 @@ export function renderFrame(
   nativeSource = false,
 ) {
   // Rectify original camera pixels; preview and legacy JPEG may limit output width.
-  const source = rotatedFrame(video, settings, nativeSource ? Infinity : maxWidth);
+  const reuse = !nativeSource && !raw;
+  const source = rotatedFrame(video, settings, nativeSource ? Infinity : maxWidth, reuse);
   if (raw) return source;
   const ratio = outputRatio(settings, source.width, source.height);
-  const output = document.createElement('canvas');
+  const output = reuse ? (cachedOutputCanvas ??= document.createElement('canvas')) : document.createElement('canvas');
   const c = settings.corners;
   const cropWidth = settings.perspectiveEnabled
     ? (distance(c[0], c[1], source.width, source.height) +
@@ -220,7 +230,7 @@ export function renderFrame(
 }
 
 export function capture(video: CameraSource, settings: CameraSettings, format: 'jpeg' | 'png' = 'jpeg') {
-  // OpenAI PNG keeps the selected region's camera pixels without lossy encoding.
+  // PNG keeps the selected region's camera pixels without lossy encoding.
   const frame = renderFrame(video, settings, format === 'png' ? Infinity : 1280, false, true);
   return format === 'png' ? frame.toDataURL('image/png') : frame.toDataURL('image/jpeg', 0.85);
 }

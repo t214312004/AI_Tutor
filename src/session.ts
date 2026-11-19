@@ -1,23 +1,12 @@
-import { pcm16, Resampler, SpeechGate } from './audio';
-import { Boundary, playbackReceipt } from './core';
+import { pcm16, Resampler } from './audio';
+import { CodexVoicePeer } from './codex-voice';
 
-type Speech = {
-  type: 'speech';
-  session_id: string;
-  generation: number;
-  playback_id: string;
-  text: string;
-  audio: string;
-  boundaries: Boundary[];
-};
 type Photo = string | { image: string; meta: Record<string, unknown> } | null;
 type Callbacks = {
   event: (event: any) => void;
   error: (message: string) => void;
   capture: () => Photo | Promise<Photo>;
   board: (html: string, close: boolean) => Promise<void>;
-  playbackGate: (value: boolean) => void;
-  caption: (text: string) => void;
 };
 function encode(bytes: ArrayBuffer) {
   let text = '';
@@ -32,15 +21,13 @@ export class BasicConnection {
   private captureNode: AudioWorkletNode | null = null;
   private source: MediaStreamAudioSourceNode | null = null;
   private generation = 0;
+  private directionRevision = 0;
+  private workSequence = 0;
+  private interactionMode: 'normal' | 'listening' | 'closing' = 'normal';
+  private lastDeliveryAt = 0;
   private boardRevision = 0;
   private userMic = false;
-  private pendingUtterance: string | null = null;
   private inputEpoch = 0;
-  private playback = false;
-  private gate = new SpeechGate();
-  private player: HTMLAudioElement | null = null;
-  private speech: Speech | null = null;
-  private audioURL = '';
   private closed = false;
   private outputContext: AudioContext | null = null;
   private outputNodes = new Set<AudioBufferSourceNode>();
@@ -48,14 +35,20 @@ export class BasicConnection {
   private outputEpoch = 0;
   private outputTask: Promise<void> = Promise.resolve();
   private closeAck: (() => void) | null = null;
+  private cancelConnect: (() => void) | null = null;
   private closing: Promise<void> | null = null;
   private recovering = false;
   private photoTransport: { base: string; token: string } | null = null;
   private photoUploads = new Set<AbortController>();
+  private voiceEngine: 'agy' | 'codex' | null = null;
+  private agyMediaId: string | null = null;
+  private agyReady = false;
+  private nativePeer: CodexVoicePeer | null = null;
+  private microphone: MediaStream | null = null;
+  private nativeEpoch = 0;
   constructor(
     private id: string,
     private callbacks: Callbacks,
-    private mode: 'basic' | 'gpt' | 'gemini' = 'basic',
   ) {}
   async connect(base: string, token: string, route = `/sessions/${this.id}/stream`) {
     this.photoTransport = { base: base.replace(/\/$/, ''), token };
@@ -63,39 +56,55 @@ export class BasicConnection {
     this.socket = socket;
     return new Promise<void>((resolve, reject) => {
       let ready = false;
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.cancelConnect === abort) this.cancelConnect = null;
+        if (err) reject(err);
+        else resolve();
+      };
+      const abort = () => finish(Error('教學連線已關閉'));
+      this.cancelConnect = abort;
       const timer = setTimeout(() => {
         socket.close();
-        reject(Error('教學連線逾時'));
+        finish(Error('教學連線逾時'));
       }, this.recovering ? 5000 : 30000);
       socket.onopen = () => socket.send(JSON.stringify({ type: 'authenticate', token }));
       socket.onerror = () => {
-        clearTimeout(timer);
-        reject(Error('無法建立教學連線'));
+        finish(Error('無法建立教學連線'));
       };
       socket.onclose = (event) => {
         clearTimeout(timer);
-        if (this.socket !== socket) return;
+        if (this.socket !== socket) {
+          finish(Error('教學連線已關閉'));
+          return;
+        }
         this.socket = null;
         this.cancelPhotos();
         this.closeAck?.();
         if (!this.closed && ready) {
-          this.stopPlayback(false);
+          this.stopNativeVoice();
           this.clearPCM();
           this.pauseCapture();
           this.callbacks.event({ type: 'transport_lost', code: event.code });
           void this.recover(base, token, route);
         }
-        reject(Error('教學連線已關閉'));
+        finish(Error('教學連線已關閉'));
       };
       socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           if (data.type === 'closed') this.closeAck?.();
           if (data.type === 'ready') {
-            clearTimeout(timer);
             ready = true;
             this.generation = data.generation;
-            resolve();
+            this.directionRevision = data.direction_revision ?? 0;
+            this.workSequence = data.work_sequence ?? 0;
+            this.interactionMode = data.interaction_mode ?? 'normal';
+            this.voiceEngine = data.voice_engine === 'agy' || data.voice_engine === 'codex' ? data.voice_engine : null;
+            finish();
           }
           void this.receive(data).catch((e) => this.callbacks.error(String(e)));
         } catch {
@@ -134,10 +143,11 @@ export class BasicConnection {
   private send(message: Record<string, unknown>) {
     if (this.closed || this.socket?.readyState !== WebSocket.OPEN) {
       if (message.type === 'audio') throw Error('教學連線尚未就緒，這句沒有送出');
+      if (message.type === 'text') throw Error('教學連線尚未就緒，文字沒有送出；請在重連後再試一次');
       return;
     }
-    if (this.socket.bufferedAmount > 2_000_000 &&
-        ['audio', 'frame', 'activity'].includes(String(message.type))) {
+    if (this.socket.bufferedAmount > (message.type === 'agy_audio' ? 32_768 : 2_000_000) &&
+        ['audio', 'agy_audio', 'frame', 'activity'].includes(String(message.type))) {
       this.pauseCapture();
       this.callbacks.event({ type: 'transport_backpressure', kind: message.type,
         buffered_bytes: this.socket.bufferedAmount });
@@ -146,7 +156,7 @@ export class BasicConnection {
     this.socket.send(JSON.stringify({ ...message, session_id: this.id }));
   }
   private async sendFrame(message: Record<string, unknown>) {
-    if (this.mode !== 'gpt' || !String(message.image).startsWith('data:image/png;base64,')) {
+    if (!this.voiceEngine && !String(message.image).startsWith('data:image/png;base64,')) {
       this.send(message);
       return;
     }
@@ -171,8 +181,10 @@ export class BasicConnection {
         const body = await response.json().catch(() => ({}));
         throw Error(typeof body.detail === 'string' ? body.detail : `照片傳送失敗（HTTP ${response.status}）`);
       }
+      const { accepted } = await response.json();
+      if (controller.signal.aborted) return;
       this.callbacks.event({ type: 'photo_upload', stage: 'done', image_chars: imageChars,
-        elapsed_ms: Math.round(performance.now() - started) });
+        accepted: accepted === true, elapsed_ms: Math.round(performance.now() - started) });
     } catch (error) {
       if (controller.signal.aborted && !timedOut) return;
       this.callbacks.event({ type: 'photo_upload', stage: 'error', image_chars: imageChars,
@@ -189,7 +201,12 @@ export class BasicConnection {
   async attachMicrophone(stream: MediaStream) {
     await this.detachMicrophone();
     if (this.closed) return;
-    const rate = this.mode === 'gpt' ? 24000 : 16000;
+    this.microphone = stream;
+    if (this.voiceEngine === 'codex') {
+      await this.restartNativeVoice();
+      return;
+    }
+    const rate = 16000;
     const context = new AudioContext({ sampleRate: rate });
     this.context = context;
     try {
@@ -204,64 +221,23 @@ export class BasicConnection {
     const resampler = new Resampler(context.sampleRate, rate);
     let pending: number[] = [];
     let inputEpoch = this.inputEpoch;
-    let lastActivity = 0;
     this.captureNode.port.onmessage = (event) => {
       if (inputEpoch !== this.inputEpoch) {
         pending = [];
         resampler.clear();
         inputEpoch = this.inputEpoch;
       }
-      if (!this.userMic || this.playback || this.pendingUtterance || this.closed) return;
-      if (this.mode === 'basic') {
-        const samples = event.data as Float32Array;
-        const rms = Math.sqrt(
-          samples.reduce((sum, x) => sum + x * x, 0) / Math.max(1, samples.length),
-        );
-        if (rms >= 0.015 && performance.now() - lastActivity > 1000) {
-          lastActivity = performance.now();
-          try {
-            this.send({ type: 'activity' });
-          } catch (e) {
-            this.callbacks.error(String(e));
-          }
-        }
-      }
-      if (this.mode !== 'basic') {
-        pending.push(...resampler.push(event.data));
-        if (pending.length >= rate / 10) {
-          try {
-            this.send({ type: 'audio', pcm: encode(pcm16(new Float32Array(pending))) });
-          } catch (e) {
-            this.callbacks.error(String(e));
-          }
-          pending = [];
-        }
-        return;
-      }
-      const wasCapturing = this.gate.capturing;
-      const segment = this.gate.push(resampler.push(event.data));
-      if (!wasCapturing && this.gate.capturing)
-        this.callbacks.event({ type: 'audio_stage', stage: 'capturing' });
-      if (segment) {
-        const utterance_id = crypto.randomUUID();
-        this.pendingUtterance = utterance_id;
-        this.inputEpoch++;
-        this.syncMic();
-        this.callbacks.event({ type: 'audio_stage', stage: 'sending' });
+      const rtc_id = this.agyMediaId;
+      if (!this.userMic || this.closed || !rtc_id || !this.agyReady) return;
+      pending.push(...resampler.push(event.data));
+      while (pending.length >= 640) {
         try {
-          this.send({ type: 'audio', pcm: encode(pcm16(segment.pcm)), utterance_id,
-            audio_meta: { reason:segment.reason,
-              duration_seconds:Math.round(segment.durationSeconds*100)/100,
-              voiced_seconds:Math.round(segment.voicedSeconds*100)/100,
-              peak_rms:Math.round(segment.peakRms*1000)/1000 } });
-        } catch (e) {
-          this.pendingUtterance = null;
-          this.syncMic();
-          this.callbacks.event({ type: 'audio_stage', stage: 'rejected' });
-          this.callbacks.error(String(e));
+          this.send({ type: 'agy_audio', rtc_id, pcm: encode(pcm16(Float32Array.from(pending.splice(0, 640)))) });
+        } catch (error) {
+          this.callbacks.error(String(error));
+          break;
         }
-      } else if (wasCapturing && !this.gate.capturing)
-        this.callbacks.event({ type: 'audio_stage', stage: 'ready' });
+      }
     };
     try {
       this.source.connect(this.captureNode);
@@ -272,6 +248,7 @@ export class BasicConnection {
       silent.connect(context.destination);
       await context.resume();
       this.syncMic();
+      if (this.voiceEngine === 'agy') await this.restartNativeVoice();
     } catch (error) {
       if (this.context === context) await this.detachMicrophone();
       throw error;
@@ -280,20 +257,17 @@ export class BasicConnection {
   setMic(enabled: boolean) {
     this.inputEpoch++;
     this.userMic = enabled;
-    if (!enabled) this.pendingUtterance = null;
-    this.gate.clear();
     this.syncMic();
     this.send({ type: 'mic', enabled });
     this.callbacks.event({ type: 'audio_stage', stage: enabled ? 'ready' : 'off' });
   }
   private syncMic() {
-    this.captureNode?.port.postMessage(this.userMic && !this.playback && !this.pendingUtterance && !this.closed);
+    this.nativePeer?.setMic(this.userMic && !this.closed);
+    this.captureNode?.port.postMessage(this.userMic && !this.closed);
   }
   private pauseCapture() {
     this.inputEpoch++;
     this.userMic = false;
-    this.pendingUtterance = null;
-    this.gate.clear();
     this.syncMic();
   }
   setCamera(enabled: boolean) {
@@ -304,50 +278,118 @@ export class BasicConnection {
     await this.sendFrame({ type: 'frame', image, capture_meta });
   }
   begin() {
-    if (this.mode === 'basic') this.send({ type: 'begin' });
+    this.send({ type: 'begin' });
   }
   text(text: string) {
     this.send({ type: 'text', text });
   }
+  selectNativeVoice(voice: string) {
+    if (this.voiceEngine !== 'codex' || this.closed) return;
+    this.stopNativeVoice();
+    this.callbacks.event({type:'native_voice_status',stage:'connecting'});
+    this.send({type:'native_voice_select',voice});
+  }
+  confirmAgyTool(id: string, approved: boolean) {
+    if (this.voiceEngine === 'agy') this.send({type: 'agy_tool_confirm', id, approved});
+  }
   lesson(action: 'confirm' | 'done' | 'todo', task_id?: string) {
     this.send({ type: 'lesson', action, task_id });
   }
-  async interrupt(enableMic = true) {
-    const receipt =
-      this.speech && this.player
-        ? playbackReceipt(this.speech.text, this.speech.boundaries, this.player.currentTime)
-        : {};
-    const playback_id = this.speech?.playback_id;
-    if (playback_id)
-      this.callbacks.event({
-        type: 'speech_stopped',
-        playback_id,
-        text: 'fully_heard' in receipt ? receipt.fully_heard : '',
-      });
+  interaction(mode: 'normal' | 'listening' | 'closing', speaker?: string) {
+    // Close the local gate immediately, before the server/provider round trip.
+    if (mode !== 'normal') {
+      this.interactionMode = mode;
+      this.clearPCM();
+      this.syncMic();
+      this.nativePeer?.setQuiet(true);
+    }
+    this.send({ type: 'interaction', mode, speaker });
+  }
+  private stopNativeVoice() {
+    this.nativeEpoch++;
+    this.nativePeer?.close();
+    this.nativePeer = null;
+    if (this.voiceEngine === 'agy') {
+      this.agyReady = false;
+      this.agyMediaId = null;
+      this.inputEpoch++;
+      this.clearPCM();
+    }
+  }
+  async restartNativeVoice() {
+    if (!this.voiceEngine || this.closed || !this.microphone?.getAudioTracks().some(track => track.readyState === 'live')) return;
+    this.stopNativeVoice();
+    const epoch = this.nativeEpoch;
+    this.callbacks.event({ type: 'native_voice_status', stage: 'connecting' });
+    if (this.voiceEngine === 'agy') {
+      this.agyMediaId = crypto.randomUUID();
+      this.send({ type: 'agy_voice_start', rtc_id: this.agyMediaId });
+      return;
+    }
+    const peer = new CodexVoicePeer(this.microphone, event => {
+      if (this.nativePeer === peer && !this.closed) {
+        if (event.type === 'native_voice_status' && event.stage === 'connected') this.send({type:'native_voice_connected',rtc_id:peer.id});
+        if (event.type === 'native_voice_status' && event.stage === 'error') this.send({type:'native_voice_stop'});
+        this.callbacks.event(event);
+      }
+    }, message => {
+      if (this.nativePeer === peer && !this.closed) this.callbacks.error(message);
+    });
+    this.nativePeer = peer;
+    peer.setQuiet(this.interactionMode !== 'normal');
+    peer.setMic(this.userMic);
+    try {
+      const sdp = await peer.offer();
+      if (this.closed || epoch !== this.nativeEpoch) return;
+      this.send({ type: 'native_voice_offer', sdp, rtc_id: peer.id });
+    } catch (error) {
+      if (!this.closed && epoch === this.nativeEpoch) {
+        this.stopNativeVoice();
+        this.callbacks.event({ type: 'native_voice_status', stage: 'error' });
+        throw error;
+      }
+    }
+  }
+  async interrupt(enableMic = this.userMic) {
     this.generation++;
     this.inputEpoch++;
-    this.pendingUtterance = null;
-    this.stopPlayback(false);
-    this.gate.clear();
+    this.stopNativeVoice();
+    this.clearPCM();
     this.userMic = enableMic;
     this.syncMic();
-    this.send({ type: 'interrupt', playback_id, receipt });
+    this.send({ type: 'interrupt', receipt: {} });
     this.send({ type: 'mic', enabled: this.userMic });
     this.callbacks.event({ type: 'audio_stage', stage: this.userMic ? 'ready' : 'off' });
   }
   private async receive(event: any) {
     if (this.closed || (event.session_id && event.session_id !== this.id)) return;
+    if (this.voiceEngine === 'agy' && event.rtc_id && event.rtc_id !== this.agyMediaId) return;
     if (typeof event.generation === 'number' && event.generation < this.generation) return;
+    if (typeof event.direction_revision === 'number' && event.direction_revision < this.directionRevision) return;
+    if (['speech','board'].includes(event.type) && typeof event.work_sequence === 'number' && event.work_sequence < this.workSequence) return;
+    if (typeof event.direction_revision === 'number') this.directionRevision = event.direction_revision;
+    if (typeof event.work_sequence === 'number') this.workSequence = Math.max(this.workSequence,event.work_sequence);
     if (event.type === 'interrupted') this.generation = event.generation;
-    if (event.type === 'audio_status') {
-      if (event.utterance_id && event.utterance_id !== this.pendingUtterance) return;
-      if (event.stage === 'ignored' || event.stage === 'rejected') {
-        this.pendingUtterance = null;
-        this.syncMic();
-      }
-      this.callbacks.event({ type: 'audio_stage', stage: event.stage });
+    if (event.type === 'native_voice_answer') {
+      const peer = this.nativePeer;
+      if (peer && event.rtc_id === peer.id) await peer.answer(event.sdp);
       return;
     }
+    if (event.type === 'native_voice_restart') { await this.restartNativeVoice(); return; }
+    if (event.type === 'native_voice_policy') {
+      if (event.mode !== 'normal') this.nativePeer?.setQuiet(true);
+      else { await this.restartNativeVoice(); }
+      return;
+    }
+    if (event.type === 'native_voice_status') {
+      if (this.voiceEngine === 'agy') this.agyReady = event.stage === 'connected';
+      if (event.stage === 'error') this.stopNativeVoice();
+    }
+    if (event.type === 'agy_pcm') {
+      if (this.agyReady && this.interactionMode === 'normal') await this.playPCM(event.audio, event.rate);
+      return;
+    }
+    if (event.type === 'agy_clear') { this.clearPCM(); return; }
     if (event.type === 'capture_requested') {
       try {
         const capture = await this.callbacks.capture();
@@ -358,26 +400,18 @@ export class BasicConnection {
       } catch (e) {
         this.callbacks.error(String(e));
       }
+    } else if (event.type === 'interaction_policy') {
+      this.interactionMode = event.mode;
+      if (event.mode !== 'normal') {
+        this.clearPCM();
+        this.syncMic();
+      }
+      this.callbacks.event(event);
     } else if (event.type === 'board' && event.revision > this.boardRevision) {
       this.boardRevision = event.revision;
       await this.callbacks.board(event.html, event.close);
-    } else if (event.type === 'speech') await this.play(event);
-    else if (event.type === 'idle') {
-      this.pendingUtterance = null;
-      this.syncMic();
-      this.callbacks.event({ type: 'audio_stage', stage: 'ready' });
-      this.callbacks.event(event);
-    }
-    else if (event.type === 'pcm') await this.playPCM(event.audio, event.rate);
+    } else if (event.type === 'pcm' && this.interactionMode === 'normal') await this.playPCM(event.audio, event.rate);
     else if (event.type === 'audio_clear') this.clearPCM();
-    else if (event.type === 'error') {
-      if (this.pendingUtterance) {
-        this.pendingUtterance = null;
-        this.syncMic();
-        this.callbacks.event({ type: 'audio_stage', stage: 'rejected' });
-      }
-      this.callbacks.event(event);
-    }
     else if (event.type === 'media_stopped') {
       this.pauseCapture();
       this.clearPCM();
@@ -391,13 +425,14 @@ export class BasicConnection {
     return task;
   }
   private async schedulePCM(encoded: string, rate: number, epoch: number) {
+    if (this.closed || epoch !== this.outputEpoch || this.interactionMode !== 'normal') return;
     if (rate !== 24000) throw Error('不支援的 Live 音訊格式');
     const bytes = Uint8Array.from(atob(encoded), (c) => c.charCodeAt(0));
     if (bytes.length % 2) throw Error('Live 音訊資料不完整');
-    if (this.closed || epoch !== this.outputEpoch) return;
+    if (bytes.length === 0) return;
     const context = (this.outputContext ??= new AudioContext({ sampleRate: rate }));
     await context.resume();
-    if (this.closed || epoch !== this.outputEpoch) return;
+    if (this.closed || epoch !== this.outputEpoch || this.interactionMode !== 'normal') return;
     if (this.outputUntil - context.currentTime > 8) {
       this.clearPCM();
       throw Error('語音播放落後，已清除過期播音');
@@ -412,129 +447,58 @@ export class BasicConnection {
     const start = Math.max(context.currentTime + 0.025, this.outputUntil);
     this.outputUntil = start + buffer.duration;
     this.outputNodes.add(source);
+    if (this.voiceEngine === 'agy' && this.outputNodes.size === 1)
+      this.callbacks.event({ type: 'native_voice_speaking', speaking: true });
     source.onended = () => {
       this.outputNodes.delete(source);
       source.disconnect();
+      if (this.voiceEngine === 'agy' && this.outputNodes.size === 0)
+        this.callbacks.event({ type: 'native_voice_speaking', speaking: false });
+      this.delivery('ended');
     };
+    this.delivery('scheduled');
     source.start(start);
+  }
+  private delivery(delivery: 'scheduled' | 'ended' | 'cleared') {
+    if (performance.now() - this.lastDeliveryAt < 5000) return;
+    this.lastDeliveryAt = performance.now();
+    this.send({ type: 'audio_delivery', delivery });
   }
   private clearPCM() {
     this.outputEpoch++;
+    if (this.voiceEngine === 'agy' && this.outputNodes.size)
+      this.callbacks.event({ type: 'native_voice_speaking', speaking: false });
     for (const source of this.outputNodes) {
       source.onended = null;
-      source.stop();
-      source.disconnect();
+      try { source.stop(); } catch {}
+      try { source.disconnect(); } catch {}
     }
     this.outputNodes.clear();
     this.outputUntil = 0;
   }
-  private async play(event: Speech) {
-    this.stopPlayback(true);
-    this.callbacks.event({ type: 'speech_started', playback_id: event.playback_id, text: '' });
-    this.speech = event;
-    this.playback = true;
-    this.inputEpoch++;
-    this.gate.clear();
-    this.syncMic();
-    this.callbacks.playbackGate(true);
-    const data = Uint8Array.from(atob(event.audio), (c) => c.charCodeAt(0));
-    this.audioURL = URL.createObjectURL(new Blob([data], { type: 'audio/mpeg' }));
-    const player = new Audio(this.audioURL);
-    this.player = player;
-    player.ontimeupdate = () => {
-      if (this.player === player)
-        this.callbacks.caption(
-          playbackReceipt(event.text, event.boundaries, player.currentTime).fully_heard,
-        );
-    };
-    player.onended = () => {
-      if (this.player !== player) return;
-      this.callbacks.caption(event.text);
-      this.callbacks.event({ type: 'speech_finished', playback_id: event.playback_id });
-      this.send({ type: 'played', playback_id: event.playback_id, complete: true });
-      this.pendingUtterance = null;
-      this.stopPlayback(false);
-      this.callbacks.event({ type: 'audio_stage', stage: 'ready' });
-    };
-    player.onerror = () => {
-      if (this.player === player) {
-        this.pendingUtterance = null;
-        this.stopPlayback(true);
-        this.callbacks.error('語音播放失敗，這段內容尚未聽到');
-      }
-    };
-    try {
-      await player.play();
-    } catch (e) {
-      // A cancelled or replaced player can reject after the next speech starts.
-      // Only the player that still owns playback may stop it or report failure.
-      if (this.player === player) {
-        this.pendingUtterance = null;
-        this.stopPlayback(true);
-        throw e;
-      }
-    }
-  }
-  private stopPlayback(report: boolean) {
-    if (report && this.player && this.speech) {
-      const receipt = playbackReceipt(
-        this.speech.text,
-        this.speech.boundaries,
-        this.player.currentTime,
-      );
-      this.callbacks.event({
-        type: 'speech_stopped',
-        playback_id: this.speech.playback_id,
-        text: receipt.fully_heard,
-      });
-      try {
-        this.send({
-          type: 'played',
-          playback_id: this.speech.playback_id,
-          receipt: playbackReceipt(this.speech.text, this.speech.boundaries, this.player.currentTime),
-          complete: false,
-        });
-      } catch (error) { this.callbacks.error(String(error)); }
-    }
-    this.player?.pause();
-    if (this.player) {
-      this.player.src = '';
-      this.player.load();
-    }
-    this.player = null;
-    this.speech = null;
-    if (this.audioURL) URL.revokeObjectURL(this.audioURL);
-    this.audioURL = '';
-    this.playback = false;
-    this.callbacks.playbackGate(false);
-    this.syncMic();
-  }
   private async detachMicrophone() {
+    this.stopNativeVoice();
+    this.microphone = null;
     this.captureNode?.disconnect();
     this.source?.disconnect();
     this.captureNode = null;
     this.source = null;
-    if (this.context && this.context.state !== 'closed') await this.context.close();
+    const context = this.context;
     this.context = null;
-    this.gate.clear();
+    if (context && context.state !== 'closed') await context.close();
   }
   async close() {
     if (this.closing) return this.closing;
     this.closing = this.finishClose();
     return this.closing;
   }
-  finalizePlayback() {
-    const value = this.speech && this.player
-      ? { playback_id: this.speech.playback_id,
-          heard: playbackReceipt(this.speech.text, this.speech.boundaries, this.player.currentTime).fully_heard }
-      : null;
-    this.stopPlayback(true);
+  stopPlayback() {
+    this.stopNativeVoice();
     this.clearPCM();
-    return value;
   }
   private async finishClose() {
+    this.stopNativeVoice();
     this.cancelPhotos();
-    this.stopPlayback(true);
     this.clearPCM();
     const acknowledged = new Promise<void>((resolve) => {
       this.closeAck = resolve;
@@ -542,23 +506,26 @@ export class BasicConnection {
     const open = this.socket?.readyState === WebSocket.OPEN;
     this.send({ type: 'close' });
     this.closed = true;
+    this.cancelConnect?.();
     this.pauseCapture();
-    await this.detachMicrophone();
-    if (this.outputContext) {
-      await this.outputContext.close();
+    try {
+      const output = this.outputContext;
       this.outputContext = null;
+      await Promise.all([this.detachMicrophone(), output?.close()]);
+      if (open) {
+        let timer: ReturnType<typeof setTimeout>;
+        await Promise.race([
+          acknowledged,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, 20000);
+          }),
+        ]);
+        clearTimeout(timer!);
+      }
+    } finally {
+      this.socket?.close();
+      this.socket = null;
+      this.closeAck = null;
     }
-    if (open) {
-      let timer: ReturnType<typeof setTimeout>;
-      await Promise.race([
-        acknowledged,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, 20000);
-        }),
-      ]);
-      clearTimeout(timer!);
-    }
-    this.socket?.close();
-    this.socket = null;
   }
 }

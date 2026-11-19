@@ -19,10 +19,10 @@ try {
   function Await-Action($action) { $task = $actionMethod.Invoke($null,@($action)); $task.Wait() }
   $devices = Await-Operation ([Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync([Windows.Devices.Enumeration.DeviceClass]::VideoCapture)) ([Windows.Devices.Enumeration.DeviceInformationCollection])
   $name = $CameraLabel -replace '\s*\([0-9a-fA-F]{4}:[0-9a-fA-F]{4}\)$', ''
-  $matches = @($devices | Where-Object { $_.Name -eq $name })
-  if ($matches.Count -ne 1) { throw 'Cannot uniquely identify the selected camera for native photography.' }
+  $matched = @($devices | Where-Object { $_.Name -eq $name })
+  if ($matched.Count -ne 1) { throw 'Cannot uniquely identify the selected camera for native photography.' }
   $settings = New-Object Windows.Media.Capture.MediaCaptureInitializationSettings
-  $settings.VideoDeviceId = $matches[0].Id
+  $settings.VideoDeviceId = $matched[0].Id
   $settings.StreamingCaptureMode = [Windows.Media.Capture.StreamingCaptureMode]::Video
   # Auto also supports cameras without a separate hardware photo stream.
   $settings.PhotoCaptureSource = [Windows.Media.Capture.PhotoCaptureSource]::Auto

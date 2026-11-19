@@ -16,6 +16,25 @@ from .test_basic import Teacher,Speech
 from .transport import RuntimeBridge
 
 class BackpressureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_sender_detaches_even_when_client_sends_nothing(self):
+        runtime=SimpleNamespace(session=SimpleNamespace(id='send-failed',generation=0),
+            set_mic=lambda value:None,set_camera=lambda value:None)
+        from unittest.mock import AsyncMock
+        runtime.interrupt=AsyncMock();runtime.close=AsyncMock(return_value={})
+        class Socket:
+            async def accept(self):pass
+            async def receive_json(self):return {'type':'authenticate','token':'secret'}
+            async def send_json(self,event):
+                if event['type']!='ready':raise RuntimeError('socket failed')
+            async def receive_text(self):await asyncio.Event().wait()
+            async def close(self,code):pass
+        bridge=RuntimeBridge(runtime)
+        await bridge.emit({'type':'thinking'})
+        await asyncio.wait_for(bridge.serve(Socket(),'secret'),1)
+        self.assertFalse(bridge.connected)
+        runtime.interrupt.assert_awaited_once()
+        await bridge.close()
+
     async def test_large_native_image_message_is_not_rejected_by_old_transport_cap(self):
         image = 'data:image/png;base64,' + 'A' * 5_400_000
         class Runtime:
@@ -99,6 +118,23 @@ class BackpressureTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(bridge.expiry,1)
         self.assertTrue(bridge.closed)
         self.assertEqual(runtime.closed,1)
+
+    async def test_expiry_callback_can_close_from_a_child_task(self):
+        closed = asyncio.Event()
+
+        async def close_runtime():
+            await asyncio.sleep(0)
+            closed.set()
+            return {'closed': True}
+
+        async def on_expire():
+            await asyncio.wait_for(bridge.close(), 1)
+
+        bridge = RuntimeBridge(SimpleNamespace(close=close_runtime), on_expire=on_expire)
+        bridge.arm_expiry(timeout=0)
+        await asyncio.wait_for(bridge.expiry, 1)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(bridge.cost, {'closed': True})
 
     async def test_output_overflow_closes_idle_socket_and_runtime(self):
         class Runtime:

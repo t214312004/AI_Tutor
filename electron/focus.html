@@ -8,27 +8,40 @@
     body {
       margin: 0;
       height: 100%;
-      background: #edf0e8;
-      color: #365444;
-      font-family: 'Microsoft JhengHei', sans-serif;
+      background: #f5f4ef;
+      color: #285c4b;
+      font-family: 'Microsoft JhengHei UI', 'Microsoft JhengHei', sans-serif;
     }
     body {
       display: grid;
       place-items: center;
       text-align: center;
+      box-sizing: border-box;
+      padding: 32px;
     }
     .leaf {
-      font-size: 90px;
+      font-size: 64px;
+      line-height: 1;
+      width: 108px;
+      height: 108px;
+      display: grid;
+      place-items: center;
+      margin: 0 auto 32px;
+      background: #eaf1e4;
+      border: 1px solid #d8e3d1;
+      border-radius: 36px;
     }
     h1 {
       font-weight: 400;
-      letter-spacing: 8px;
-      font-size: 30px;
+      letter-spacing: 3px;
+      font-size: clamp(22px, 4vw, 32px);
+      line-height: 1.8;
     }
     p {
-      color: #718276;
+      color: #5c7065;
       font-size: 14px;
-      letter-spacing: 2px;
+      letter-spacing: 1px;
+      line-height: 1.8;
     }
     .line {
       height: 1px;
@@ -38,7 +51,7 @@
     }
   </style>
   <div>
-    <div class="leaf">❧</div>
+    <div class="leaf" aria-hidden="true">❧</div>
     <h1>留一點安靜，給成長。</h1>
     <div class="line"></div>
     <p>正在陪讀 · 請看主要螢幕</p>

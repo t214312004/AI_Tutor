@@ -28,8 +28,8 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-前端直接依賴 React、React DOM、lucide-react 及官方 Codex CLI；桌面使用 Electron。後端使用 FastAPI、Starlette、Uvicorn、httpx、edge-tts、python-multipart、pypdf、websockets。精確版本與遞迴依賴見 `package-lock.json` 及 `requirements-lock.txt`；Node 套件授權欄位在 lockfile 中可查。安裝時由各套件來源取得其授權檔，沒有將 node_modules 或 site-packages 再散布在本倉庫。
+前端直接依賴 React、React DOM、lucide-react 及官方 Codex CLI。桌面使用 Electron。後端使用 FastAPI、Starlette、Uvicorn、httpx、pypdf、websockets 及 Windows 終端橋接套件 pywinpty。精確版本與遞迴依賴見 `package-lock.json` 及 `requirements-lock.txt`。安裝時由各套件來源取得其授權檔。
 
-圖示來源為 lucide-react；展示作業由 `scripts/synthetic-worksheet.mjs` 產生。合成學生、學校及課綱 fixture 由本專案撰寫，不取自真人紀錄。介面使用系統字型，未附字型檔。
+圖示來源為 lucide-react。展示資料與測試用學生、學校、課綱和作業影像均由本專案以合成內容建立。介面使用系統字型。
 
 課綱匯入程式從 [國家教育研究院](https://www.naer.edu.tw/PageSyllabus?fid=52) 取得官方文件，保留來源、checksum 與頁碼。匯入資料留在使用者快取內，不因本專案 MIT 授權而變更其來源權利。新增素材或發布含第三方執行檔的安裝包前須另外核對再散布條件。

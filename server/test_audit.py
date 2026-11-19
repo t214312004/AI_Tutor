@@ -14,9 +14,7 @@ from .basic import BasicRuntime
 from .basic_workspace import BasicWorkspace
 from .test_basic import Speech
 from .test_basic_workspace import RecordingTutor
-from .test_live_runtime import Provider
 from .tutor import TutorSession
-from .live_runtime import LiveRuntime
 
 
 class AuditTests(unittest.IsolatedAsyncioTestCase):
@@ -47,29 +45,6 @@ class AuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((audit.root / 'workspace-after' / 'notes.txt').read_text(encoding='utf-8'), '下次要複習進位')
             self.assertEqual((audit.root / 'AGENTS.md').read_bytes(), (workspace.root / 'AGENTS.md').read_bytes())
 
-    async def test_live_photo_is_saved_for_later_review(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            workspace = root / 'teacher'
-            workspace.mkdir()
-            audit = SessionAudit(root / 'audit', 'lesson-2', 'gemini', 'gemini', workspace)
-            provider = AuditedProvider(RecordingTutor(), audit, 'teacher')
-            async def emit(event): pass
-            runtime = LiveRuntime(TutorSession('student-test', 3), provider, provider,
-                                  'gemini', 'test-key', emit, lambda *args: None)
-            runtime.provider = Provider()
-            runtime.audit = audit
-            image = b'\xff\xd8\xfflive-photo'
-            runtime.accept_frame('data:image/jpeg;base64,' + base64.b64encode(image).decode())
-            await runtime.observations.task
-            await asyncio.gather(*list(runtime.photo_tasks))
-            await runtime.close()
-            events = [json.loads(line) for line in audit.events.read_text(encoding='utf-8').splitlines()]
-            saved = [item for item in events if item['kind'] == 'photo_saved']
-            self.assertEqual(len(saved), 1)
-            self.assertEqual((audit.root / saved[0]['path']).read_bytes(), image)
-            self.assertTrue(any(item['kind'] == 'live_image_sent' and
-                                item['capture_id'] == saved[0]['capture_id'] for item in events))
 
     async def test_live_workspace_snapshot_includes_teacher_and_observer(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -92,31 +67,6 @@ class AuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse((audit.root / 'workspace-after' / 'observer' / 'linked' / 'private.txt').exists())
             self.assertFalse((audit.root / 'workspace-after' / 'teacher' / ('agy-' + 'a' * 32 + '.log')).exists())
 
-    async def test_live_tool_exchange_is_recorded_and_unsent_image_is_not(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            workspace = root / 'teacher'
-            workspace.mkdir()
-            audit = SessionAudit(root / 'audit', '1' * 32, 'gemini', 'gemini', workspace)
-            provider = AuditedProvider(RecordingTutor(), audit, 'teacher')
-            async def emit(event):pass
-            runtime = LiveRuntime(TutorSession('student-test', 3), provider, provider,
-                                  'gemini', 'test-key', emit, lambda *args: None)
-            runtime.provider = Provider()
-            runtime.audit = audit
-            await runtime.gemini_event({'toolCall': {'functionCalls': [
-                {'id': 'close-1', 'name': 'close_board', 'args': {}}]}})
-            await asyncio.gather(*runtime.tools.values())
-            runtime.provider.ready = False
-            self.assertFalse(await runtime.send_live_image({
-                'id': 'unsent', 'image': 'data:image/jpeg;base64,/9j/'}))
-            events = [json.loads(line) for line in audit.events.read_text(encoding='utf-8').splitlines()]
-            self.assertTrue(any(item['kind'] == 'live_tool_call' and item['call']['id'] == 'close-1'
-                                for item in events))
-            self.assertTrue(any(item['kind'] == 'live_tool_result' and item['call_id'] == 'close-1'
-                                for item in events))
-            self.assertFalse(any(item['kind'] == 'live_image_sent' for item in events))
-            await runtime.close()
 
     async def test_audit_write_failure_does_not_block_tutor_response(self):
         with tempfile.TemporaryDirectory() as folder:

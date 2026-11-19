@@ -1,11 +1,6 @@
-import json
-import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch
 
-from .post_lesson import SECTIONS,analyze,records,validate
-from .audit import SessionAudit
+from .post_lesson import memory_payload, records
 
 
 class PostLessonTests(unittest.IsolatedAsyncioTestCase):
@@ -25,44 +20,46 @@ class PostLessonTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(utterance['data']['text'],'我不會算')
         self.assertEqual(len([item for item in entries if item['kind']=='live_transcript']),1)
 
-    async def test_ai_summary_requires_real_source_ids(self):
-        answer={key:[] for key in SECTIONS}
-        answer['difficulties']=[{'text':'學生詢問加法','sources':['e1']}]
-        class FakeProvider:
-            def __init__(self,workspace):pass
-            async def turn(self,prompt,**kwargs):return json.dumps(answer,ensure_ascii=False)
-            async def close(self):pass
-        with tempfile.TemporaryDirectory() as folder,patch('server.post_lesson.LazyCodex',FakeProvider):
-            root=Path(folder)
-            audit=SessionAudit(root/'audit','session-1','gpt','codex',root/'teacher')
-            result,provider,turns=await analyze(self.snapshot(),'codex',root,audit=audit)
-            entries=[json.loads(line) for line in audit.events.read_text(encoding='utf-8').splitlines()]
-            self.assertTrue(any(item['kind']=='agent_request' and
-                                '課後學習資料整理員' in item['prompt'] for item in entries))
-            self.assertTrue(any(item['kind']=='agent_response' for item in entries))
-        self.assertEqual(result['difficulties'][0]['sources'],['e1'])
-        self.assertEqual((provider,turns),('codex',1))
-        answer['difficulties'][0]['sources']=['not-in-this-session']
-        with self.assertRaisesRegex(ValueError,'不存在的來源'):
-            validate(json.dumps(answer,ensure_ascii=False),{'e1'})
-
-    async def test_configured_responses_summary_uses_selected_model(self):
+    def test_reused_transcript_id_does_not_overwrite_a_prior_paragraph(self):
         snapshot=self.snapshot()
-        snapshot['events'].append({'id':'cfg','kind':'session_config','created':'2026-09-27T00:00:00Z',
-            'payload':{'gpt_live':{'version':1,
-                'delegation':{'type':'responses','model':'gpt-6.1-sol','effort':'low'},
-                'vision':{'provider':'openai','model':'gpt-6-luna','effort':'max'}}}})
-        chosen=[];usage=[]
-        class FakeResponses:
-            def __init__(self,key,model,effort):
-                chosen.append((key,model,effort));self.usage=[{'input_tokens':4}]
-            async def turn(self,prompt,**kwargs):
-                return json.dumps({key:[] for key in SECTIONS})
-            async def close(self):pass
-        with tempfile.TemporaryDirectory() as folder,\
-             patch('server.openai_vision.OpenAIResponsesProvider',FakeResponses):
-            _,provider,_=await analyze(snapshot,'gpt_configured',Path(folder),
-                                       openai_key='test-key',usage_callback=usage.append)
-        self.assertEqual(chosen,[('test-key','gpt-6.1-sol','low')])
-        self.assertEqual(provider,'openai')
-        self.assertEqual(usage,[{'input_tokens':4}])
+        for event in snapshot['events']:
+            event['payload']['projection_version']=1
+        snapshot['events'][1]['created']='2026-09-27T00:01:10Z'
+        utterances=[item for item in records(snapshot) if item['kind']=='live_transcript']
+        self.assertEqual([item['data']['text'] for item in utterances],['我不','會算'])
+        self.assertEqual([item['data']['sources'] for item in utterances],[['e1'],['e2']])
+        snapshot['events'][1]['created']=snapshot['events'][0]['created']
+        snapshot['events'][0]['payload']['text']='甲'*8000
+        utterances=[item for item in records(snapshot) if item['kind']=='live_transcript']
+        self.assertEqual(''.join(item['data']['text'] for item in utterances),'甲'*8000+'會算')
+
+    def test_speakers_are_not_merged_into_one_student_utterance(self):
+        snapshot=self.snapshot()
+        snapshot['events'][0]['payload']['speaker']='student'
+        snapshot['events'][1]['payload']['speaker']='parent'
+        utterances=[item for item in records(snapshot) if item['kind']=='live_transcript']
+        self.assertEqual([item['data']['speaker'] for item in utterances],['student','parent'])
+        self.assertEqual([item['data']['text'] for item in utterances],['我不','會算'])
+
+    def test_memory_payload_orders_questions_chronologically_and_excludes_parent(self):
+        snapshot={
+            'session':{'id':'session-2','started':'2026-09-27T00:00:00Z',
+                       'grade':2,'mode':'basic','notes':'練習加法'},
+            'events':[
+                {'id':'e1','kind':'student_utterance','created':'2026-09-27T00:01:00Z',
+                 'payload':{'text':'第一題不會'}},
+                {'id':'e2','kind':'live_transcript','created':'2026-09-27T00:02:00Z',
+                 'payload':{'transcript_id':'t1','role':'user','speaker':'parent','text':'家長問句'}},
+                {'id':'e3','kind':'live_transcript','created':'2026-09-27T00:03:00Z',
+                 'payload':{'transcript_id':'t2','role':'user','speaker':'student','text':'第二題怎麼算'}},
+                {'id':'e4','kind':'student_utterance','created':'2026-09-27T00:04:00Z',
+                 'payload':{'text':'第三題懂了'}},
+                {'id':'e5','kind':'student_utterance','created':'2026-09-27T00:05:00Z',
+                 'payload':{'text':'家長打字','speaker':'parent'}},
+                {'id':'e6','kind':'live_transcript','created':'2026-09-27T00:06:00Z',
+                 'payload':{'role':'user','speaker':'onsite_teacher','text':'現場老師說話'}},
+            ],
+            'evidence':[],
+        }
+        payload=memory_payload(snapshot)
+        self.assertEqual(payload['student_questions'],['第一題不會','第二題怎麼算','第三題懂了'])

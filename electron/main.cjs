@@ -7,6 +7,7 @@ const {
   session,
   powerMonitor,
   dialog,
+  shell,
 } = require('electron');
 const { spawn } = require('node:child_process');
 const { randomBytes } = require('node:crypto');
@@ -16,9 +17,7 @@ const { pathToFileURL } = require('node:url');
 
 app.setName('HomeworkCompanion');
 const storage = require('./shared-storage.cjs');
-const testing = process.argv.some((arg) =>
-  ['--smoke', '--device-probe', '--test-mode'].includes(arg),
-);
+const testing = storage.testing;
 const dataHome = storage.configure(app, testing);
 const nativePhoto = require('./native-photo.cjs').createNativePhoto({
   testing: testing && !process.argv.includes('--native-camera-probe'),
@@ -70,22 +69,38 @@ function pruneDiagnosticFiles() {
     }
   }
 }
+let diagnosticOpenedAt = null;
+function diagnosticFileStartedAt() {
+  if (diagnosticOpenedAt !== null) return diagnosticOpenedAt;
+  try {
+    if (fs.existsSync(diagnosticPath)) {
+      const firstLine = fs.readFileSync(diagnosticPath, 'utf8').split('\n', 1)[0];
+      const parsed = firstLine ? Date.parse(firstLine.slice(0, 24)) : Number.NaN;
+      diagnosticOpenedAt = Number.isNaN(parsed) ? fs.statSync(diagnosticPath).mtimeMs : parsed;
+      return diagnosticOpenedAt;
+    }
+  } catch {}
+  diagnosticOpenedAt = Date.now();
+  return diagnosticOpenedAt;
+}
 function writeDiagnostic(event, detail = '') {
   if (!diagnosticEvents.has(event)) return;
   const safeDetail = String(detail).slice(0, 40).replace(/[^A-Za-z0-9_-]/g, '_');
   try {
-    pruneDiagnosticFiles();
-    if (fs.existsSync(diagnosticPath) && fs.lstatSync(diagnosticPath).isSymbolicLink())
-      throw Error('Desktop diagnostic path is a link');
-    if (fs.existsSync(diagnosticPath) &&
-        (fs.statSync(diagnosticPath).size > 1_000_000 ||
-         Date.now() - fs.statSync(diagnosticPath).birthtimeMs >= diagnosticDayMs)) {
-      fs.rmSync(`${diagnosticPath}.2`, { force: true });
-      for (let index = 2; index >= 1; index--) {
-        const previous = index === 1 ? diagnosticPath : `${diagnosticPath}.${index - 1}`;
-        const next = `${diagnosticPath}.${index}`;
-        if (fs.existsSync(previous)) fs.renameSync(previous, next);
+    if (fs.existsSync(diagnosticPath)) {
+      const lstat = fs.lstatSync(diagnosticPath);
+      if (lstat.isSymbolicLink()) throw Error('Desktop diagnostic path is a link');
+      if (lstat.size > 1_000_000 || Date.now() - diagnosticFileStartedAt() >= diagnosticDayMs) {
+        fs.rmSync(`${diagnosticPath}.2`, { force: true });
+        for (let index = 2; index >= 1; index--) {
+          const previous = index === 1 ? diagnosticPath : `${diagnosticPath}.${index - 1}`;
+          const next = `${diagnosticPath}.${index}`;
+          if (fs.existsSync(previous)) fs.renameSync(previous, next);
+        }
+        diagnosticOpenedAt = Date.now();
       }
+    } else {
+      diagnosticOpenedAt = Date.now();
     }
     fs.appendFileSync(diagnosticPath, `${new Date().toISOString()} ${event} ${safeDetail}\n`, 'utf8');
   } catch (error) {
@@ -120,11 +135,17 @@ function trusted(event) {
     throw Error('Untrusted sender');
 }
 function closeBoard() {
-  clearTimeout(boardTimer);
+  clearInterval(boardTimer);
+  boardTimer = null;
   if (board) {
-    main?.contentView.removeChildView(board);
-    board.webContents.close();
+    const view = board;
     board = null;
+    try {
+      if (main && !main.isDestroyed()) main.contentView.removeChildView(view);
+    } catch {}
+    try {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+    } catch {}
   }
 }
 function masksClose() {
@@ -160,9 +181,13 @@ function focus(enabled) {
 }
 function attachKeys(contents) {
   contents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && (input.key === 'Escape' || input.key === 'F11')) {
+    if (input.type !== 'keyDown' || input.isAutoRepeat) return;
+    if (input.key === 'F11') {
       event.preventDefault();
-      focus(input.key === 'Escape' ? false : !focusing);
+      focus(!focusing);
+    } else if (input.key === 'Escape' && focusing) {
+      event.preventDefault();
+      focus(false);
     }
   });
 }
@@ -188,46 +213,88 @@ function loadCore() {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let output = '';
-    const timer = setTimeout(() => reject(Error('本機核心啟動逾時')), 20000);
-    child.stdout.on('data', (chunk) => {
+    let settled = false;
+    const onStdout = (chunk) => {
+      if (settled) return;
       output += chunk;
-      const line = output.split('\n')[0];
-      try {
-        const ready = JSON.parse(line);
-        if (ready.port) {
-          clearTimeout(timer);
-          connection = { base: `http://127.0.0.1:${ready.port}`, token };
-          writeDiagnostic('core_ready');
-          resolve(connection);
-        }
-      } catch {}
-    });
+      const lines = output.split('\n');
+      output = lines.pop();
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+          const ready = JSON.parse(trimmed);
+          if (ready.port) {
+            settled = true;
+            clearTimeout(timer);
+            child.stdout.off('data', onStdout);
+            child.stdout.resume();
+            output = '';
+            connection = { base: `http://127.0.0.1:${ready.port}`, token };
+            writeDiagnostic('core_ready');
+            resolve(connection);
+            return;
+          }
+        } catch {}
+      }
+      if (output.length > 65536) output = output.slice(-8192);
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child?.stdout?.off('data', onStdout);
+      try { child?.kill(); } catch {}
+      reject(Error('本機核心啟動逾時'));
+    }, 20000);
+    child.stdout.on('data', onStdout);
     child.stderr.on('data', (chunk) => process.stderr.write(chunk));
     child.on('error', (error) => {
+      clearTimeout(timer);
+      child?.stdout?.off('data', onStdout);
       writeDiagnostic('core_spawn_error', error?.name);
-      reject(error);
+      if (!settled) {
+        settled = true;
+        reject(error);
+      }
     });
     child.on('exit', (code, signal) => {
       writeDiagnostic('core_exit', exiting ? 'expected' : code ?? signal ?? 'unknown');
       clearTimeout(timer);
-      reject(Error('本機核心無法啟動；請確認其他 Windows 帳號已關閉伴讀。'));
+      child?.stdout?.off('data', onStdout);
+      if (!settled) {
+        settled = true;
+        reject(Error('本機核心無法啟動；請確認其他 Windows 帳號已關閉伴讀。'));
+      }
       if (!exiting) {
         connection = undefined;
-        main?.webContents.send('media:suspend', 'core');
+        if (main && !main.isDestroyed()) main.webContents.send('media:suspend', 'core');
         focus(false);
       }
     });
   });
 }
-async function restoreKeys() {
-  const keys = storage.readKeys(dataHome);
-  if (Object.keys(keys).length) {
-    await fetch(connection.base + '/credentials', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(keys),
-    });
-  }
+let agySetupTask;
+let agySetupChild;
+function setupAgy() {
+  if (agySetupTask) return agySetupTask;
+  const python = path.join(root, '.venv/Scripts/python.exe');
+  const powershell = path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  agySetupTask = new Promise((resolve, reject) => {
+    const setup = spawn(powershell, ['-NoProfile', '-NonInteractive', '-Command',
+      '$ErrorActionPreference="Stop"; $p=Start-Process -FilePath $env:TUTOR_SETUP_PYTHON -ArgumentList "-X","utf8","-m","server.agy_setup" -WorkingDirectory $env:TUTOR_SETUP_WORKSPACE -PassThru -Wait; if (-not $p) { exit 1 }; exit $p.ExitCode'],
+    { windowsHide: true, stdio: 'ignore', env: { ...process.env,
+      TUTOR_SETUP_PYTHON: python, TUTOR_SETUP_WORKSPACE: root } });
+    agySetupChild = setup;
+    setup.once('error', reject);
+    setup.once('exit', (code) => code === 0 ? resolve() : reject(Error('agy 首次設定視窗無法完成。')));
+  }).finally(() => { agySetupTask = undefined; agySetupChild = undefined; });
+  return agySetupTask;
 }
 app.whenReady().then(async () => {
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) =>
@@ -253,7 +320,13 @@ app.whenReady().then(async () => {
     },
   });
   attachKeys(main.webContents);
-  main.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  main.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'https:') shell.openExternal(parsed.href).catch(() => {});
+    } catch {}
+    return { action: 'deny' };
+  });
   main.webContents.on('will-navigate', (e, url) => {
     if (url !== trustedURL) e.preventDefault();
   });
@@ -261,6 +334,8 @@ app.whenReady().then(async () => {
     if (focusing) focus(false);
   });
   main.on('closed', () => {
+    closeBoard();
+    main = null;
     masksClose();
     app.quit();
   });
@@ -320,21 +395,10 @@ app.whenReady().then(async () => {
     trusted(event);
     focus(value);
   });
-  ipcMain.handle('keys:save', async (event, keys) => {
+  ipcMain.handle('agy:setup', async (event) => {
     trusted(event);
-    const allowed = storage.readKeys(dataHome);
-    for (const key of ['GROQ_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY']) {
-      if (typeof keys[key] !== 'string' || keys[key].length > 300) throw Error('無效金鑰');
-      if (keys[key].trim()) allowed[key] = keys[key].trim();
-    }
-    storage.writeKeys(allowed, dataHome);
-    const res = await fetch(connection.base + '/credentials', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + connection.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(allowed),
-    });
-    if (!res.ok) throw Error('核心未儲存金鑰');
-    return true;
+    if (focusing) throw Error('請先離開課堂再設定 agy。');
+    await setupAgy();
   });
   ipcMain.handle('board:close', (event) => {
     trusted(event);
@@ -358,7 +422,7 @@ app.whenReady().then(async () => {
     trusted(event);
     if (typeof html !== 'string' || html.length > 200000) throw Error('白板內容過大');
     for (const k of ['x', 'y', 'width', 'height'])
-      if (!Number.isFinite(bounds[k]) || bounds[k] < 0) throw Error('白板範圍錯誤');
+      if (!Number.isFinite(bounds?.[k]) || bounds[k] < 0 || bounds[k] > 20000) throw Error('白板範圍錯誤');
     closeBoard();
     board = new WebContentsView({
       webPreferences: {
@@ -380,7 +444,11 @@ app.whenReady().then(async () => {
     board.webContents.on('will-navigate', (e) => e.preventDefault());
     attachKeys(board.webContents);
     main.contentView.addChildView(board);
-    board.setBounds(Object.fromEntries(Object.entries(bounds).map(([k, v]) => [k, Math.round(v)])));
+    board.setBounds(
+      Object.fromEntries(
+        ['x', 'y', 'width', 'height'].map((k) => [k, Math.round(bounds[k])]),
+      ),
+    );
     const policy =
       "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src 'none'; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
     const doc = `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="${policy}"><meta charset="utf-8"><style>body{font-family:Microsoft JhengHei,sans-serif;color:#203d32;padding:32px;background:#fffefa}button{font:inherit;padding:12px}</style></head><body>${html}</body></html>`;
@@ -408,12 +476,11 @@ app.whenReady().then(async () => {
   });
   for (const name of ['suspend', 'lock-screen'])
     powerMonitor.on(name, () => {
-      main.webContents.send('media:suspend', name);
+      if (main && !main.isDestroyed()) main.webContents.send('media:suspend', name);
       focus(false);
     });
   try {
     await loadCore();
-    await restoreKeys();
     try {
       const pending = await fetch(connection.base + '/finalizations/pending', {
         headers: { Authorization: 'Bearer ' + connection.token },
@@ -440,21 +507,49 @@ app.whenReady().then(async () => {
     }
   } catch (e) {
     console.error(e.message);
-    const { dialog } = require('electron');
-    if (!smoke) dialog.showErrorBox('伴讀無法啟動', e.message);
+    if (!testing) dialog.showErrorBox('伴讀無法啟動', e.message);
+    try { child?.kill(); } catch {}
     app.exit(1);
   }
 });
 app.on('second-instance', () => {
-  main?.show();
-  main?.focus();
+  if (main && !main.isDestroyed()) {
+    main.show();
+    main.focus();
+  }
 });
-app.on('before-quit', () => {
+let waitingForCoreExit = false;
+app.on('before-quit', (event) => {
+  if (waitingForCoreExit) {
+    event.preventDefault();
+    return;
+  }
+  if (exiting) return;
+  if (main && !main.isDestroyed() && finalizing && !closeAllowed) {
+    event.preventDefault();
+    main.close();
+    return;
+  }
   exiting = true;
-  nativePhoto.cancel();
-  closeBoard();
-  masksClose();
-  child?.stdin.end();
-  child?.kill();
+  try { nativePhoto.cancel(); } catch {}
+  try { agySetupChild?.kill(); } catch {}
+  try { closeBoard(); } catch {}
+  try { masksClose(); } catch {}
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return;
+  event.preventDefault();
+  waitingForCoreExit = true;
+  const finished = () => {
+    child.off('exit', finished);
+    clearTimeout(deadline);
+    waitingForCoreExit = false;
+    app.quit();
+  };
+  const deadline = setTimeout(() => {
+    try { child.kill(); } catch {}
+    finished();
+  }, 35_000);
+  child.once('exit', finished);
+  child.stdin.on('error', () => {});
+  child.stdin.end();
 });
 app.on('window-all-closed', () => app.quit());

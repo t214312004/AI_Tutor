@@ -1,18 +1,64 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { BasicConnection } from './session';
 
+it('rejects a typed question when the socket has disconnected', () => {
+  vi.stubGlobal('WebSocket',{OPEN:1});
+  const client=connection();
+  Object.assign(client,{socket:{readyState:3}});
+  expect(()=>client.text('這題怎麼想？')).toThrow('文字沒有送出');
+});
+
 function connection() {
   return new BasicConnection('test', {
     event: () => {},
     error: () => {},
     capture: () => '',
     board: async () => {},
-    playbackGate: () => {},
-    caption: () => {},
-  }, 'gpt');
+  });
 }
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+it('interrupt immediately stops scheduled Live audio and invalidates pending chunks', async () => {
+  vi.stubGlobal('WebSocket', { OPEN: 1 });
+  const client=connection();
+  const source={stop:vi.fn(),disconnect:vi.fn(),onended:vi.fn()};
+  Object.assign(client,{socket:{readyState:1,bufferedAmount:0,send:vi.fn()},
+    outputNodes:new Set([source]),outputUntil:8});
+  const epoch=(client as any).outputEpoch;
+  await client.interrupt();
+  expect(source.stop).toHaveBeenCalledOnce();
+  expect(source.disconnect).toHaveBeenCalledOnce();
+  expect((client as any).outputNodes.size).toBe(0);
+  expect((client as any).outputUntil).toBe(0);
+  expect((client as any).outputEpoch).toBeGreaterThan(epoch);
+});
+
+it('blocks queued PCM on listen policy without closing capture', async () => {
+  vi.stubGlobal('WebSocket',{ OPEN:1 });
+  const client=connection();
+  const send=vi.fn(), gate=vi.fn();
+  Object.assign(client,{ socket:{ readyState:1,bufferedAmount:0,send },userMic:true,
+    pendingUtterance:'reading',captureNode:{port:{postMessage:gate}} });
+  const play=vi.spyOn(client as any,'playPCM');
+  client.interaction('listening');
+  expect((client as any).userMic).toBe(true);
+  expect(gate).toHaveBeenCalledWith(true);
+  await (client as any).receive({ type:'pcm',audio:'AAAAAA==',rate:24000 });
+  expect(play).not.toHaveBeenCalled();
+  expect(JSON.parse(send.mock.calls[0][0])).toMatchObject({type:'interaction',mode:'listening'});
+});
+
+it('rejects old direction and work versions before board or audio side effects',async () => {
+  const client=connection();
+  Object.assign(client,{ directionRevision:3,workSequence:8 });
+  const play=vi.spyOn(client as any,'playPCM');
+  const board=vi.fn();(client as any).callbacks.board=board;
+  await (client as any).receive({ type:'pcm',direction_revision:2,work_sequence:9 });
+  await (client as any).receive({ type:'board',direction_revision:3,work_sequence:7,revision:5,html:'old' });
+  expect(play).not.toHaveBeenCalled();expect(board).not.toHaveBeenCalled();
+});
+
 
 it('awaits a native photo without delaying audio messages and ignores it after lesson close', async () => {
   vi.stubGlobal('WebSocket', { OPEN: 1 });
@@ -21,7 +67,7 @@ it('awaits a native photo without delaying audio messages and ignores it after l
   const client = new BasicConnection('test', {
     event: () => {}, error: () => {},
     capture: () => new Promise<string>(resolve => { complete = resolve; }),
-    board: async () => {}, playbackGate: () => {}, caption: () => {},
+    board: async () => {},
   });
   Object.assign(client, { socket: { readyState: 1, bufferedAmount: 0, send } });
   const pending = (client as any).receive({ type: 'capture_requested', request_id: 'fresh' });
@@ -39,7 +85,7 @@ it('sends the awaited native photo with the requesting identifier and metadata',
   const client = new BasicConnection('test', {
     event: () => {}, error: () => {},
     capture: async () => ({ image: 'data:image/jpeg;base64,AA==', meta: { capture_method: 'windows-native-photo' } }),
-    board: async () => {}, playbackGate: () => {}, caption: () => {},
+    board: async () => {},
   });
   Object.assign(client, { socket: { readyState: 1, bufferedAmount: 0, send } });
   await (client as any).receive({ type: 'capture_requested', request_id: 'fresh' });
@@ -81,41 +127,6 @@ it('closes the microphone AudioContext when its worklet cannot load', async () =
   expect(closes).toBe(1);
 });
 
-it('ignores a late play rejection from speech that was already replaced', async () => {
-  const players: any[] = [];
-  class AudioStub {
-    currentTime = 0;
-    src = '';
-    ontimeupdate: (() => void) | null = null;
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    resolve!: () => void;
-    reject!: (error: Error) => void;
-    constructor() { players.push(this); }
-    play() {
-      return new Promise<void>((resolve, reject) => {
-        this.resolve = resolve;
-        this.reject = reject;
-      });
-    }
-    pause() {}
-    load() {}
-  }
-  vi.stubGlobal('Audio', AudioStub);
-  vi.stubGlobal('URL', { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} });
-  const client = connection();
-  const speech = (id: string) => ({
-    type: 'speech', session_id: 'test', generation: 0,
-    playback_id: id, text: id, audio: 'AA==', boundaries: [],
-  });
-  const first = (client as any).play(speech('first'));
-  const second = (client as any).play(speech('second'));
-  players[0].reject(Error('old playback was cancelled'));
-  await expect(first).resolves.toBeUndefined();
-  expect((client as any).player).toBe(players[1]);
-  players[1].resolve();
-  await second;
-});
 
 it('still sends mute and camera-off controls when upload is backlogged', async () => {
   const send = vi.fn();
@@ -141,8 +152,8 @@ it('keeps audio flowing while a large PNG HTTP upload is pending', async () => {
   vi.stubGlobal('fetch', fetchMock);
   const client = new BasicConnection('test', {
     event: event => events.push(event), error: () => {}, capture: () => '',
-    board: async () => {}, playbackGate: () => {}, caption: () => {},
-  }, 'gpt');
+    board: async () => {},
+  });
   Object.assign(client, { socket, userMic: true,
     photoTransport: { base: 'http://127.0.0.1:1234', token: 'test-token' } });
   const image = 'data:image/png;base64,' + 'A'.repeat(2_300_000);
@@ -154,9 +165,10 @@ it('keeps audio flowing while a large PNG HTTP upload is pending', async () => {
   expect((client as any).userMic).toBe(true);
   expect(socket.bufferedAmount).toBe(0);
   expect(send.mock.calls.map(([raw]) => JSON.parse(raw).type)).toEqual(['audio', 'audio']);
-  complete({ ok: true });
+  complete({ ok: true, json: async () => ({ accepted: true }) });
   await uploading;
   expect(events.map(e => e.stage)).toEqual(['start', 'done']);
+  expect(events[1]).toMatchObject({ accepted: true });
 });
 
 it('reports PNG upload failure without muting audio', async () => {
@@ -225,26 +237,6 @@ it('aborts PNG uploads at lesson close and ignores subsequent frames', async () 
   expect(socket.close).toHaveBeenCalledTimes(1);
 });
 
-it('reopens capture only after the matching audio segment is ignored', async () => {
-  const stages: string[] = [];
-  const gate = vi.fn();
-  const client = new BasicConnection('test', {
-    event: (event) => { if (event.type === 'audio_stage') stages.push(event.stage); },
-    error: () => {}, capture: () => '', board: async () => {},
-    playbackGate: () => {}, caption: () => {},
-  });
-  (client as any).userMic = true;
-  (client as any).pendingUtterance = 'current';
-  (client as any).captureNode = { port: { postMessage: gate } };
-  await (client as any).receive({ type:'audio_status',session_id:'test',generation:0,
-    utterance_id:'old',stage:'ignored' });
-  expect((client as any).pendingUtterance).toBe('current');
-  await (client as any).receive({ type:'audio_status',session_id:'test',generation:0,
-    utterance_id:'current',stage:'ignored' });
-  expect((client as any).pendingUtterance).toBeNull();
-  expect(gate).toHaveBeenCalledWith(true);
-  expect(stages).toEqual(['ignored']);
-});
 
 it('reconnects after a transient socket close and keeps the same lesson connection', async () => {
   const sockets: any[] = [];
@@ -264,7 +256,6 @@ it('reconnects after a transient socket close and keeps the same lesson connecti
   const client = new BasicConnection('lesson-1', {
     event: (event) => events.push(event.type),
     error: () => {}, capture: () => '', board: async () => {},
-    playbackGate: () => {}, caption: () => {},
   });
   const initial = client.connect('http://127.0.0.1:1234', 'secret');
   sockets[0].onopen();

@@ -33,3 +33,17 @@ test('native worker is hidden, serialized and cancellable without returning a st
   done(null, JSON.stringify({ image, method: 'windows-native-photo' }));
   assert.equal((await next).width, 1);
 });
+
+test('cancellation discards successful output and holds the device until exit', async () => {
+  let finish;
+  const service = createNativePhoto({ run(_exe, _args, _options, callback) {
+    finish = callback;
+    return { kill() {} };
+  } });
+  const options = { label: 'Synthetic camera', aspectRatio: 16 / 9 };
+  const cancelled = assert.rejects(service.take(options), /取消或逾時/);
+  service.cancel();
+  await assert.rejects(service.take(options), /正在拍照/);
+  finish(null, JSON.stringify({ image }));
+  await cancelled;
+});

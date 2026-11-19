@@ -14,46 +14,8 @@ const app = await electron.launch({
 try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
-  await page.addInitScript(() => {
-    const Original = window.Audio;
-    window.__audioPlayers = 0;
-    window.Audio = class extends Original {
-      constructor(...args) {
-        super(...args);
-        window.__audioPlayers++;
-      }
-    };
-  });
-  await page.reload();
-  let release;
-  const delayed = new Promise((resolve) => (release = resolve));
-  let requested;
-  const arrived = new Promise((resolve) => (requested = resolve));
-  await page.route('**/diagnostics/tts', async (route) => {
-    requested();
-    await delayed;
-    await route.fulfill({ json: { audio: '', boundaries: [] } });
-  });
-  await page.locator('.preflight-optional > summary').click();
-  await page.getByRole('button', { name: '試聽老師聲音' }).click();
-  await Promise.race([
-    arrived,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(Error('TTS request was not intercepted')), 8000),
-    ),
-  ]);
-  await page.locator('.advanced > summary').click();
-  await page.getByRole('button', { name: 'GPT Live', exact: false }).click();
-  release();
-  await page.waitForTimeout(200);
-  assert.equal(
-    await page.evaluate(() => window.__audioPlayers),
-    0,
-    'changing mode must invalidate late TTS',
-  );
-  await page.getByRole('button', { name: '基本陪讀', exact: false }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await page.getByRole('button', { name: '關鏡頭', exact: true }).waitFor();
   await app.evaluate(({ powerMonitor }) => powerMonitor.emit('lock-screen'));
   await page.getByRole('button', { name: '開鏡頭', exact: true }).waitFor();
@@ -117,23 +79,23 @@ try {
   await page.evaluate(() => window.__releaseMic());
   await page.getByRole('button', { name: '關閉麥克風', exact: true }).waitFor();
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   assert.equal(await page.evaluate(() => window.__testCamera.getTracks()[0].readyState), 'ended');
   assert.equal(await page.evaluate(() => window.__activeCamera.getTracks()[0].readyState), 'ended');
   assert.equal(await page.evaluate(() => window.__testMic.getTracks()[0].readyState), 'ended');
-  await page.evaluate(async () => {
-    const config = await window.desktop.connection();
-    await fetch(config.base + '/credentials', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer ' + config.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ OPENAI_API_KEY: 'test-only-not-a-real-key' }),
-    });
-  });
-  await page.reload();
-  await page.locator('.advanced > summary').click();
-  await page.getByRole('button', { name: 'GPT Live', exact: false }).click();
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).waitFor();
   await page.getByRole('button', { name: '關閉鏡頭' }).click();
+  // This device-race scenario does not need a provider or model-access check.
+  const mockGptSessions = async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname === '/sessions') return route.fulfill({json:{
+      id:'mock-device-race',mode:'basic',basic_voice:'codex',online:true,teacher_name:'老師',
+    }});
+    return route.fulfill({json:pathname.includes('/finaliz') ? {
+      session_id:'mock-device-race',state:'completed',stage:'completed',
+      snapshot_saved:true,summary_available:false,online:false,
+    } : {}});
+  };
+  await page.route(/\/sessions(?:\/|$)/, mockGptSessions);
   await page.evaluate(async () => {
     const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
     const camera = await original({ video: true, audio: false });
@@ -152,37 +114,14 @@ try {
         : original(constraints);
   });
   await page.getByRole('button', { name: '開啟鏡頭' }).click();
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀', exact: true }).click();
   await page.getByRole('button', { name: '結束', exact: true }).waitFor();
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '檢查並開始陪讀', exact: true }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀', exact: true }).waitFor();
   await page.evaluate(() => window.__releaseLateCamera());
   await page.waitForFunction(() => window.__lateCamera.getTracks()[0].readyState === 'ended');
   assert.equal(await page.evaluate(() => window.__webSockets), 0);
-  let transcriptionRequests = 0;
-  await page.route('**/transcribe', async (route) => {
-    transcriptionRequests++;
-    await route.abort();
-  });
-  await page.evaluate(async () => {
-    const original = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    const microphone = await original({ audio: true, video: false });
-    window.__lateNoteMic = microphone;
-    navigator.mediaDevices.getUserMedia = (constraints) =>
-      constraints.audio
-        ? new Promise((resolve) => {
-            window.__releaseLateNote = () => resolve(microphone);
-          })
-        : original(constraints);
-  });
-  await page.getByRole('button', { name: '用說的', exact: true }).click();
-  assert.equal(await page.locator('button.start').isDisabled(), true);
-  await app.evaluate(({ powerMonitor }) => powerMonitor.emit('lock-screen'));
-  await page.getByText('裝置已因鎖定或休眠而停止。', { exact: false }).waitFor();
-  await page.evaluate(() => window.__releaseLateNote());
-  await page.waitForFunction(() => window.__lateNoteMic.getTracks()[0].readyState === 'ended');
-  assert.equal(transcriptionRequests, 0);
-  assert.equal(await page.locator('button.start').isDisabled(), false);
+  await page.unroute(/\/sessions(?:\/|$)/, mockGptSessions);
   await page.reload();
   let releaseSession;
   const sessionHeld = new Promise((resolve) => (releaseSession = resolve));
@@ -197,11 +136,11 @@ try {
     await sessionHeld;
     await route.fulfill({ response });
   });
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await sessionArrived;
   await app.evaluate(({ powerMonitor }) => powerMonitor.emit('lock-screen'));
   releaseSession();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   await page.waitForFunction(async (id) => {
     const config = await window.desktop.connection();
     const response = await fetch(`${config.base}/students/student-2/history`, {
@@ -214,13 +153,11 @@ try {
   console.log(
     JSON.stringify({
       passed: [
-        'late TTS discarded after changing mode',
         'simulated lock releases camera',
         'simulated lock exits all fullscreen windows',
         'session can end after suspend',
         'cancelled camera permission closes its late track, and active tracks close on end',
         'ending during device permission prevents a late teaching connection',
-        'suspend discards a pending voice note without transcription',
         'suspend during session creation closes the late session',
       ],
     }),

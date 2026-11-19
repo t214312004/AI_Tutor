@@ -21,15 +21,15 @@ try {
   await page.waitForFunction(() => !document.querySelector('.student-create button[type=submit]')?.disabled ||
     document.querySelector('.start-card [role=status]')?.textContent?.includes('歡迎'));
   assert.equal(await page.locator('.students .student').count(), 0);
-  assert.equal(await page.getByRole('button', { name: '開始專注工作區' }).isDisabled(), true);
+  assert.equal(await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).isDisabled(), true);
   await page.getByLabel('新學生稱呼').fill('合成新學生');
   await page.getByLabel('新學生年級').selectOption('5');
   await page.getByRole('button', { name: '新增學生', exact: true }).click();
   await page.locator('.students').getByRole('button', { name: /合成新學生/ }).waitFor();
-  await page.getByRole('button', { name: '開始專注工作區' }).click();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).click();
   await page.getByRole('button', { name: '結束', exact: true }).waitFor();
   await page.getByRole('button', { name: '結束', exact: true }).click();
-  await page.getByRole('button', { name: '開始專注工作區' }).waitFor();
+  await page.getByRole('button', { name: '檢查訂閱並開始陪讀' }).waitFor();
   await app.close();
   app = await electron.launch(options);
   page = await app.firstWindow();

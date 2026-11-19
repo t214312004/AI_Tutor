@@ -2,7 +2,6 @@ fastapi==0.141.1
 starlette==1.7.0
 uvicorn==0.53.0
 httpx==0.28.1
-edge-tts==7.2.8
-python-multipart==0.0.32
-pypdf==6.19.0
+pypdf==6.21.4
+pywinpty==3.1.2; sys_platform == 'win32'
 websockets==17.1

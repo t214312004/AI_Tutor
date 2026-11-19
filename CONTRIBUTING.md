@@ -6,15 +6,24 @@
 npm ci
 npm run build
 npm test
-.\.venv\Scripts\python.exe -m unittest discover -s server -t .
+.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s server -t .
 npm run test:storage
 npm run test:first-run
 npm run test:ui
+npm run test:native-voice-ui
+npm run test:lifecycle
+npm run test:post-lesson
+npm run test:learning-memory
+npm run test:usability
+npm run test:camera
+npm run test:ui-polish
 ```
 
 Python 環境先透過 `scripts/setup.ps1` 建立。UI 測試使用 `--test-mode`、合成相機與獨立資料位置；初次啟動測試另外使用全新資料根。受限測試機可設定 `$env:TUTOR_TEST_NO_SANDBOX='1'`，此選項僅用於測試啟動。
 
-預設自動測試不需要 API key 或真實 CLI 登入。`probe-*`、`check-speech`、`check-pipeline`、`--native-camera` 等屬手動服務／裝置診斷，可能使用帳號、開啟裝置或產生費用，不屬於一般 CI。
+桌面腳本預設共用 `.local/electron-test`。請依序執行，避免同時使用相同的測試資料與檔案鎖。
+
+預設自動測試使用合成裝置與資料，可離線執行。使用真實訂閱帳號的語音驗收屬於手動測試。
 
 提交前執行 `npm run check:public`。請使用合成 fixture 重現問題；不要提交學生記憶、學習單、聯絡簿、照片、音訊、金鑰、CLI 授權、日誌或整包個人資料。新來源檔案須加入 `scripts/public-files.json` 的逐檔允許清單並經審核。不要直接對含私人檔案的開發目錄打包。
 
