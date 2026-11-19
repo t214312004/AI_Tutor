@@ -3,7 +3,14 @@ import { _electron as electron } from 'playwright';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { electronTestFlags } from './electron-test-flags.mjs';
+
+async function waitForMessage(predicate, description) {
+  const deadline = Date.now() + 5000;
+  while (!predicate() && Date.now() < deadline) await delay(25);
+  assert.ok(predicate(), description);
+}
 
 await fs.mkdir('.local',{recursive:true});
 const home=await fs.mkdtemp(path.resolve('.local/native-voice-ui-'));
@@ -109,25 +116,27 @@ try {
   await page.route(/\/sessions\/[^/]+\/events$/,route=>route.fulfill({json:{saved:true}}));
   await page.reload();
   await page.getByRole('button',{name:/^Codex Live/}).click();
-  const voiceChoices=await page.getByLabel('Codex 老師聲線',{exact:true}).locator('option').evaluateAll(nodes=>nodes.map(n=>n.value));
+  const voiceSelect=page.getByLabel('Codex 老師聲線',{exact:true});
+  const startLesson=page.getByRole('button',{name:'檢查訂閱並開始陪讀',exact:true}).and(page.locator(':enabled'));
+  await startLesson.waitFor();
+  const voiceChoices=await voiceSelect.locator('option').evaluateAll(nodes=>nodes.map(n=>n.value));
   assert.ok(voiceChoices.includes('arbor')&&voiceChoices.includes('cove')&&!voiceChoices.includes('marin'));
-  await page.getByLabel('Codex 老師聲線',{exact:true}).selectOption('arbor');
-  await page.getByRole('button',{name:'檢查訂閱並開始陪讀'}).waitFor();
-  assert.ok(await page.getByRole('button',{name:'檢查訂閱並開始陪讀'}).isEnabled());
+  await voiceSelect.selectOption('arbor');
+  await page.waitForFunction(() => Object.entries(localStorage).some(([key, value]) => /^codex-voice:.+/.test(key) && value === 'arbor'));
   assert.equal(await page.getByRole('button',{name:'試聽老師聲音'}).count(),0);
   const modes = page.getByRole('group',{name:'對話方式'}).getByRole('button');
   assert.equal(await modes.count(),2);
   assert.ok((await modes.allTextContents()).every(text=>/^(Codex|agy) Live/.test(text)));
   await page.reload();
   assert.equal(await page.getByRole('button',{name:/^Codex Live/}).getAttribute('aria-pressed'),'true');
-  assert.equal(await page.getByLabel('Codex 老師聲線',{exact:true}).inputValue(),'arbor');
+  await voiceSelect.and(page.locator('select:has(option[value="arbor"]:checked)')).waitFor();
   const screenshots=path.resolve('test-results/native-voice-ui');await fs.mkdir(screenshots,{recursive:true});
   await page.screenshot({path:path.join(screenshots,'settings.png'),fullPage:true});
   await page.setViewportSize({width:980,height:760});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'native settings must fit narrow screens');
   await page.screenshot({path:path.join(screenshots,'settings-narrow.png'),fullPage:true});
   await page.setViewportSize({width:1400,height:900});
-  await page.getByRole('button',{name:'檢查訂閱並開始陪讀'}).click();
+  await startLesson.click();
   await page.getByText('訂閱語音：已連接',{exact:true}).waitFor();
   assert.ok((await page.locator('.messages').boundingBox()).height>=160,'native dialogue must remain readable');
   await page.getByRole('button',{name:'顯示預覽',exact:true}).click();
@@ -154,6 +163,7 @@ try {
   let offers=wire.filter(type=>type==='native_voice_offer').length;
   let interrupts=wire.filter(type=>type==='interrupt').length;
   await stopTeacher.click();
+  await waitForMessage(() => wire.filter(type=>type==='native_voice_offer').length>offers, 'Stopping the teacher starts a new offer');
   await page.waitForFunction(()=>!window.__teacherSpeaking);
   await page.getByText('訂閱語音：已連接',{exact:true}).waitFor();
   await page.getByRole('button',{name:'關閉麥克風',exact:true}).waitFor();
@@ -168,6 +178,7 @@ try {
   offers=wire.filter(type=>type==='native_voice_offer').length;
   interrupts=wire.filter(type=>type==='interrupt').length;
   await page.getByRole('button',{name:'關閉麥克風',exact:true}).click();
+  await waitForMessage(() => micStates.at(-1)===false, 'The core receives the mute control');
   await page.getByRole('button',{name:'開啟麥克風',exact:true}).waitFor();
   assert.equal(await micButton.getAttribute('class'),'muted');
   assert.ok(await micButton.locator('svg.lucide-mic-off').count());
@@ -197,6 +208,7 @@ try {
   offers=wire.filter(type=>type==='native_voice_offer').length;
   interrupts=wire.filter(type=>type==='interrupt').length;
   await page.getByRole('button',{name:'開啟麥克風',exact:true}).click();
+  await waitForMessage(() => micStates.at(-1)===true, 'The core receives the unmute control');
   await page.getByRole('button',{name:'關閉麥克風',exact:true}).waitFor();
   assert.equal(await micButton.getAttribute('class'),'');
   assert.equal(micStates.at(-1),true);
@@ -204,6 +216,7 @@ try {
   assert.equal(wire.filter(type=>type==='native_voice_offer').length,offers,'unmute resumes the same call');
   assert.equal(wire.filter(type=>type==='interrupt').length,interrupts,'unmute does not interrupt playback');
   await page.getByLabel('課中 Codex 老師聲線').selectOption('cove');
+  await waitForMessage(() => selections.length>0, 'The core receives the voice selection');
   await page.getByText('訂閱語音：已連接',{exact:true}).waitFor();
   assert.deepEqual(selections,['cove']);
   assert.equal(await page.evaluate(studentId=>localStorage.getItem('codex-voice:'+studentId),starts[0].student_id),'cove');
@@ -244,20 +257,20 @@ try {
     await page.screenshot({path:path.join(screenshots,`lesson-${width}.png`)});
   }
   await page.getByRole('button',{name:'結束',exact:true}).click();
-  await page.getByRole('button',{name:'檢查訂閱並開始陪讀',exact:true}).waitFor();
+  await startLesson.waitFor();
   assert.ok(await page.evaluate(()=>[...window.__sourceTracks,...window.__nativeTracks]
     .every(track=>track.readyState==='ended')),'ending a muted lesson releases all microphone tracks');
   await page.setViewportSize({width:1400,height:900});
   await page.getByRole('button',{name:/^agy Live/}).click();
   await page.getByRole('button',{name:'agy 首次設定'}).waitFor();
-  await page.getByRole('button',{name:'檢查訂閱並開始陪讀'}).click();
+  await startLesson.click();
   await page.getByText('訂閱語音：已連接',{exact:true}).waitFor();
   assert.equal(starts.at(-1).basic_voice,'agy');
   assert.equal(await page.getByLabel('課中 Codex 老師聲線').count(),0);
   await page.getByRole('button',{name:'關閉麥克風',exact:true}).waitFor();
   await page.waitForFunction(()=>Boolean(window.__agyInput?.onmessage));
   await page.evaluate(()=>window.__agyInput.onmessage({data:new Float32Array(1280).fill(.1)}));
-  assert.ok(packets.some(e=>e.type==='agy_audio'&&e.rtc_id===agyId&&e.pcm.length>100));
+  await waitForMessage(() => packets.some(e=>e.type==='agy_audio'&&e.rtc_id===agyId&&e.pcm.length>100), 'The core receives agy microphone audio');
   sendEvent({type:'agy_classroom_proposal',id:'proposal-1',lines:['2 + 3 = 5']});
   const review=page.getByRole('group',{name:'待確認白板'});
   await review.getByText('2 + 3 = 5').waitFor();
@@ -268,13 +281,15 @@ try {
   await stopTeacher.waitFor();
   const oldAgyId=agyId;
   await stopTeacher.click();
+  await waitForMessage(() => agyId!==oldAgyId, 'Stopping teacher playback starts a new agy session');
   await page.getByText('訂閱語音：已連接',{exact:true}).waitFor();
   assert.notEqual(agyId,oldAgyId);
   sendEvent({type:'agy_pcm',rtc_id:oldAgyId,rate:24000,audio:'AQABAAEA'});
-  await page.waitForTimeout(150);
+  sendEvent({type:'transcript',role:'user',text:'舊音訊測試確認'});
+  await page.getByRole('log',{name:'陪讀對話'}).getByText('舊音訊測試確認').waitFor();
   assert.ok(!(await stopTeacher.isVisible()),'retired agy audio must stay silent');
   await page.getByRole('button',{name:'結束',exact:true}).click();
-  await page.getByRole('button',{name:'檢查訂閱並開始陪讀',exact:true}).waitFor();
+  await startLesson.waitFor();
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({passed:['no-key startup','native voice UI','two subscription modes','agy PCM and confirmation','retired agy PCM ignored',
     'preferences survive reload','voice choices match V3','prelesson voice saved','in-lesson voice switch saved',

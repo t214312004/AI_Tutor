@@ -52,17 +52,18 @@ try {
   }
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('button', { name: '家長設定', exact: true }).click();
+  const selectedTab = name => page.getByRole('tab', { name, exact: true }).and(page.locator('[aria-selected="true"]'));
   await page.getByRole('tab', { name: '個人檔案', exact: true }).click();
   await page.keyboard.press('ArrowRight');
-  assert.equal(await page.getByRole('tab', { name: '學習紀錄', exact: true }).evaluate(el => el === document.activeElement), true);
+  await page.getByRole('tab', { name: '學習紀錄', exact: true }).and(page.locator(':focus')).waitFor();
   await page.keyboard.press('Enter');
-  assert.equal(await page.getByRole('tab', { name: '學習紀錄', exact: true }).getAttribute('aria-selected'), 'true');
+  await selectedTab('學習紀錄').waitFor();
   await page.keyboard.press('End');
   await page.keyboard.press('Enter');
-  assert.equal(await page.getByRole('tab', { name: '學校與課綱', exact: true }).getAttribute('aria-selected'), 'true');
+  await selectedTab('學校與課綱').waitFor();
   await page.keyboard.press('Home');
   await page.keyboard.press('Enter');
-  assert.equal(await page.getByRole('tab', { name: '個人檔案', exact: true }).getAttribute('aria-selected'), 'true');
+  await selectedTab('個人檔案').waitFor();
   await page.keyboard.press('Escape');
   await page.getByRole('dialog', { name: '家長設定', exact: true }).waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '家長設定', exact: true }).and(page.locator(':focus')).waitFor();
